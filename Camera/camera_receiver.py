@@ -254,7 +254,6 @@ class CameraTile(Gtk.DrawingArea):
         else:
             self._placeholder(cr, W, H)
 
-        self._scanlines(cr, W, H)
         self._border(cr, W, H)
         self._cam_badge(cr, W, H)
         self._status_dot(cr, W, H)
@@ -318,15 +317,6 @@ class CameraTile(Gtk.DrawingArea):
         ext  = cr.text_extents(text)
         cr.move_to(cx - ext.width / 2, cy + r * 1.65)
         cr.show_text(text)
-        cr.restore()
-
-    def _scanlines(self, cr, W, H):
-        step = max(2, H // 120)
-        cr.save()
-        for y in range(0, H, step * 2):
-            cr.set_source_rgba(0, 0, 0, 0.06)
-            cr.rectangle(0, y, W, step)
-            cr.fill()
         cr.restore()
 
     def _border(self, cr, W, H):
