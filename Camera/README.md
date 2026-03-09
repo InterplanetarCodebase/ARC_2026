@@ -26,6 +26,11 @@ Custom resolution:
 python3 camera_transmitter.py -c /dev/video0 -i 192.168.1.100 -p 5000 -w 1280 -H 720 -f 30
 ```
 
+Practical Command:
+```bash
+python3 camera_transmitter.py -c /dev/video0 /dev/video2 /dev/video4 -i 192.168.1.100 -p 5000 -w 320 -H 240
+```
+
 ### On Base station (Receiver)
 
 Single camera:
@@ -36,6 +41,11 @@ python3 camera_receiver.py -p 5000 -i 192.168.1.50
 Multiple cameras (4 feeds):
 ```bash
 python3 camera_receiver.py -p 5000 5001 5002 5003 -i 192.168.1.50
+```
+
+Practical Command:
+```bash
+python3 camera_receiver.py -p 5000 5001 5002 5003 5004 5005 5006 5007 -i 192.168.1.50 -w 1920 -H 1080
 ```
 
 ## Notes
