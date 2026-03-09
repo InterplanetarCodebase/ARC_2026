@@ -729,7 +729,18 @@ def signal_handler(sig, frame):
 def main():
     parser = argparse.ArgumentParser(
         description="SENTINEL — Multi-Camera GUI Receiver (Jetson)",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        epilog="""
+Example usage:
+  Single camera:
+    python3 camera_receiver.py -p 5000 -i 192.168.1.50
+  
+  Multiple cameras (4 feeds):
+    python3 camera_receiver.py -p 5000 5001 5002 5003 -i 192.168.1.50
+  
+  Custom resolution:
+    python3 camera_receiver.py -p 5000 5001 -i 192.168.1.50 -w 1280 -H 720
+        """
     )
     parser.add_argument("-p", "--ports", nargs="+", type=int, default=[5000],
                         metavar="PORT",

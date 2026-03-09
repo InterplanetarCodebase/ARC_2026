@@ -725,7 +725,18 @@ def signal_handler(sig, frame):
 def main():
     parser = argparse.ArgumentParser(
         description="GStreamer Multi-Camera Transmitter — RPi4",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        epilog="""
+Example usage:
+  Single camera:
+    python3 camera_transmitter.py -c /dev/video0 -i 192.168.1.100 -p 5000
+  
+  Multiple cameras:
+    python3 camera_transmitter.py -c /dev/video0 /dev/video2 /dev/video4 -i 192.168.1.100 -p 5000
+  
+  Custom resolution and framerate:
+    python3 camera_transmitter.py -c /dev/video0 -i 192.168.1.100 -p 5000 -w 1280 -H 720 -f 30
+        """
     )
     parser.add_argument("-c", "--cameras", nargs="+", default=["/dev/video0"],
                         metavar="DEVICE",
