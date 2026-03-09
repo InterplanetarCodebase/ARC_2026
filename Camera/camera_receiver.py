@@ -207,6 +207,21 @@ class CameraBackend:
             self.status = "stopped"
 
 
+import os as _os
+
+_LOGO_SURFACE = None
+_LOGO_PATH    = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "image.png")
+
+def _load_logo():
+    global _LOGO_SURFACE
+    if _LOGO_SURFACE is None:
+        try:
+            _LOGO_SURFACE = cairo.ImageSurface.create_from_png(_LOGO_PATH)
+        except Exception as e:
+            print(f"[logo] Could not load {_LOGO_PATH}: {e}")
+    return _LOGO_SURFACE
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  Camera Tile  (Cairo-rendered GTK DrawingArea)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -306,27 +321,49 @@ class CameraTile(Gtk.DrawingArea):
         cr.stroke()
         cr.restore()
 
-        # Camera icon
+        # ── Interplanetar logo ───────────────────────────────────────────────
         cx, cy = W / 2, H / 2
-        r = min(W, H) * 0.15
         cr.save()
-        cr.set_source_rgba(0.25, 0.38, 0.50, 0.55)
-        cr.set_line_width(max(1.5, r * 0.08))
-        cr.arc(cx, cy - r * 0.08, r, 0, 2 * math.pi)
-        cr.stroke()
-        cr.arc(cx, cy - r * 0.08, r * 0.42, 0, 2 * math.pi)
-        cr.fill()
-        cr.restore()
 
-        fs = max(7, min(W, H) * 0.042)
+        # Load and draw image.png centred, scaled to ~40% of the tile's shorter side
+        try:
+            logo = _load_logo()
+            if logo:
+                lw = logo.get_width()
+                lh = logo.get_height()
+                max_logo = min(W, H) * 0.40
+                scale = min(max_logo / lw, max_logo / lh)
+                dx = cx - lw * scale / 2
+                dy = (cy - min(W, H) * 0.06) - lh * scale / 2
+                cr.translate(dx, dy)
+                cr.scale(scale, scale)
+                cr.set_source_surface(logo, 0, 0)
+                cr.paint_with_alpha(0.88)
+        except Exception:
+            # Fallback: draw ◈ symbol if image fails
+            sym_fs = max(20, min(W, H) * 0.22)
+            cr.select_font_face("Courier New", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
+            cr.set_font_size(sym_fs)
+            sym = "◈"
+            se  = cr.text_extents(sym)
+            cr.set_source_rgba(1.00, 0.53, 0.02, 0.88)
+            cr.move_to(cx - se.width / 2 + se.x_bearing,
+                       cy - min(W, H) * 0.06 - se.height / 2 - se.y_bearing)
+            cr.show_text(sym)
+
+        cr.restore()
         cr.save()
-        cr.set_source_rgba(0.35, 0.52, 0.62, 0.65)
+
+        # "WAITING FOR STREAM" caption
+        cap_fs = max(6, min(W, H) * 0.036)
         cr.select_font_face("Courier New", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_NORMAL)
-        cr.set_font_size(fs)
-        text = "WAITING FOR STREAM"
-        ext  = cr.text_extents(text)
-        cr.move_to(cx - ext.width / 2, cy + r * 1.65)
-        cr.show_text(text)
+        cr.set_font_size(cap_fs)
+        cap = "WAITING FOR STREAM"
+        ce  = cr.text_extents(cap)
+        cr.set_source_rgba(1.00, 0.53, 0.02, 0.35)
+        cr.move_to(cx - ce.width / 2 + ce.x_bearing, cy + min(W, H) * 0.32)
+        cr.show_text(cap)
+
         cr.restore()
 
     def _border(self, cr, W, H):
@@ -375,9 +412,9 @@ class CameraTile(Gtk.DrawingArea):
         cr.restore()
 
     def _stats_bar(self, cr, W, H):
-        bh  = max(20, H * 0.10)
+        bh  = max(18, H * 0.09)
         pad = 6
-        fs  = max(8, bh * 0.50)
+        fs  = max(7, bh * 0.42)
 
         cr.save()
         cr.set_source_rgba(0.00, 0.03, 0.07, 0.84)
@@ -714,7 +751,7 @@ window          { background: #060a0f; }
 #header         { background: #070d14; border-bottom: 1px solid #2a1800; }
 #title          { font-family: "Courier New"; font-size: 16px; font-weight: bold;
                   color: #ff8800; letter-spacing: 4px; }
-#subtitle       { font-family: "Courier New"; font-size: 9px; color: #4a3010;
+#subtitle       { font-family: "Courier New"; font-size: 9px; color: #ff8800;
                   letter-spacing: 3px; }
 #active-badge   { font-family: "Courier New"; font-size: 11px; color: #ff8800;
                   background: #120800; border: 1px solid #3a1800;
@@ -724,8 +761,8 @@ window          { background: #060a0f; }
                   border-radius: 4px; padding: 4px 14px; margin: 6px; }
 #back-btn:hover { background: #1a0e00; border-color: #ff8800; }
 #statusbar      { background: #040608; border-top: 1px solid #1a0e00; padding: 0 12px; }
-#status-lbl     { font-family: "Courier New"; font-size: 10px; color: #4a2e10; }
-#clock-lbl      { font-family: "Courier New"; font-size: 10px; color: #4a2e10; }
+#status-lbl     { font-family: "Courier New"; font-size: 10px; color: #ff8800; }
+#clock-lbl      { font-family: "Courier New"; font-size: 10px; color: #ff8800; }
 notebook        { background: #060a0f; }
 notebook header { background: #070d14; }
 notebook tab    { background: #0a0e14; border: 1px solid #1a0e00;
