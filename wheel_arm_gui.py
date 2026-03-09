@@ -3,11 +3,17 @@ Logitech Extreme 3D Pro — Rover Arm Control + Monitor
 pip install pygame
 """
 
-import pygame
+import os
 import sys
 import socket
 import time
 import struct as _struct
+
+# Must be set BEFORE pygame.init() — tells SDL2 to keep delivering
+# joystick/hat/button events even when the window is not in the foreground.
+os.environ["SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS"] = "1"
+
+import pygame
 
 # ── Network ─────────────────────────────────────────────────────────────────
 ROVER_IP   = "192.168.10.177"
@@ -389,9 +395,16 @@ def main():
     load_fonts()
 
     pygame.joystick.init()
-    # Allow joystick input even when window is not focused
-    pygame.event.set_grab(False)
-    pygame.joystick.init()
+
+    # pygame 2.x belt-and-suspenders: set the background events flag via the
+    # pygame API as well (harmless no-op on pygame 1.x if constant is absent).
+    try:
+        pygame.joystick.init()   # safe to call twice
+        if hasattr(pygame, "JOYSTICK_ALLOW_BACKGROUND_EVENTS"):
+            pygame.event.set_allowed(pygame.JOYSTICK_ALLOW_BACKGROUND_EVENTS)
+    except Exception:
+        pass
+
     joy = None
 
     def try_connect():
@@ -442,7 +455,18 @@ def main():
         connected = joy is not None and pygame.joystick.get_count() > 0
         if connected:
             try:
-                pygame.event.pump()   # keep SDL internals alive without blocking
+                # Drain ALL pending events so SDL's joystick state is current.
+                # This is the key step: SDL only updates get_axis()/get_button()
+                # after the relevant events have been processed from the queue.
+                # pygame.event.get() in the window-event loop above only runs
+                # when the window is focused; this call ensures joystick events
+                # are always flushed even in the background.
+                for _ in pygame.event.get(
+                    [pygame.JOYAXISMOTION, pygame.JOYBALLMOTION,
+                     pygame.JOYHATMOTION,  pygame.JOYBUTTONDOWN,
+                     pygame.JOYBUTTONUP]):
+                    pass   # just draining — state is updated as a side-effect
+
                 num_axes    = joy.get_numaxes()
                 num_buttons = joy.get_numbuttons()
                 num_hats    = joy.get_numhats()
