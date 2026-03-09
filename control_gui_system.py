@@ -67,8 +67,15 @@ BUTTON_LABELS = [
     "BTN 7","BTN 8","BTN 9","BTN 10","BTN 11","BTN 12"
 ]
 
-# Base design canvas
-BASE_W, BASE_H = 960, 700
+# Base design canvas (reference resolution — actual rendering scales to window)
+BASE_W, BASE_H = 960, 770
+
+# Scale factor — updated each frame; used by S() and all draw helpers
+_s = 1.0
+
+def S(v):
+    """Scale a design-space pixel value to current render resolution."""
+    return max(1, round(v * _s))
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -138,14 +145,14 @@ class WheelSender:
 # ── Draw helpers ──────────────────────────────────────────────────────────────
 def draw_panel(surf, rect, title=None):
     """Flat black panel with orange border and optional title."""
-    pygame.draw.rect(surf, (4, 4, 4), rect, border_radius=3)
-    pygame.draw.rect(surf, ORANGE_DIM, rect, width=1, border_radius=3)
+    pygame.draw.rect(surf, (4, 4, 4), rect, border_radius=S(3))
+    pygame.draw.rect(surf, ORANGE_DIM, rect, width=1, border_radius=S(3))
     if title:
-        # title bar accent line
         pygame.draw.rect(surf, ORANGE_HI,
-                         (rect.x + 10, rect.y + 10, 2, 14), border_radius=1)
+                         (rect.x + S(10), rect.y + S(10), S(2), S(14)),
+                         border_radius=S(1))
         lbl = FONT_SM.render(title, True, ORANGE_HI)
-        surf.blit(lbl, (rect.x + 18, rect.y + 10))
+        surf.blit(lbl, (rect.x + S(18), rect.y + S(10)))
 
 
 def draw_hline(surf, x, y, w):
@@ -154,10 +161,10 @@ def draw_hline(surf, x, y, w):
 
 def draw_axis_bar(surf, x, y, w, h, value, label="", show_val=True):
     """Bipolar bar centred at 0. Orange fill, black bg."""
-    pygame.draw.rect(surf, (8, 8, 8), (x, y, w, h), border_radius=2)
-    pygame.draw.rect(surf, ORANGE_DIM, (x, y, w, h), width=1, border_radius=2)
+    pygame.draw.rect(surf, (8, 8, 8), (x, y, w, h), border_radius=S(2))
+    pygame.draw.rect(surf, ORANGE_DIM, (x, y, w, h), width=1, border_radius=S(2))
     cx = x + w // 2
-    pygame.draw.line(surf, ORANGE_DIM, (cx, y + 2), (cx, y + h - 2))
+    pygame.draw.line(surf, ORANGE_DIM, (cx, y + S(2)), (cx, y + h - S(2)))
 
     pct  = (value + 1) / 2.0
     if value >= 0:
@@ -169,36 +176,36 @@ def draw_axis_bar(surf, x, y, w, h, value, label="", show_val=True):
 
     if fill_w > 0:
         pygame.draw.rect(surf, ORANGE_MID,
-                         pygame.Rect(fill_x, y + 2, fill_w, h - 4),
-                         border_radius=2)
+                         pygame.Rect(fill_x, y + S(2), fill_w, h - S(4)),
+                         border_radius=S(2))
 
     if label:
-        surf.blit(FONT_XS.render(label, True, ORANGE_DIM), (x, y - 15))
+        surf.blit(FONT_XS.render(label, True, ORANGE_DIM), (x, y - S(15)))
     if show_val:
         val_surf = FONT_XS.render(f"{value:+.3f}", True, ORANGE_HI)
-        surf.blit(val_surf, (x + w - val_surf.get_width(), y - 15))
+        surf.blit(val_surf, (x + w - val_surf.get_width(), y - S(15)))
 
 
 def draw_throttle_v(surf, x, y, w, h, value):
     """Vertical throttle bar. value = raw axis (-1 full, +1 off)."""
     pct = 1.0 - (value + 1) / 2.0
-    pygame.draw.rect(surf, (8, 8, 8), (x, y, w, h), border_radius=2)
-    pygame.draw.rect(surf, ORANGE_DIM, (x, y, w, h), width=1, border_radius=2)
-    fill_h = int(pct * (h - 4))
+    pygame.draw.rect(surf, (8, 8, 8), (x, y, w, h), border_radius=S(2))
+    pygame.draw.rect(surf, ORANGE_DIM, (x, y, w, h), width=1, border_radius=S(2))
+    fill_h = int(pct * (h - S(4)))
     if fill_h > 0:
         pygame.draw.rect(surf, ORANGE_MID,
-                         (x + 2, y + h - 2 - fill_h, w - 4, fill_h),
-                         border_radius=2)
+                         (x + S(2), y + h - S(2) - fill_h, w - S(4), fill_h),
+                         border_radius=S(2))
     lbl = FONT_XS.render("THR", True, ORANGE_DIM)
-    surf.blit(lbl, (x + w // 2 - lbl.get_width() // 2, y - 15))
+    surf.blit(lbl, (x + w // 2 - lbl.get_width() // 2, y - S(15)))
     val = FONT_XS.render(f"{int(pct*100)}%", True, ORANGE_HI)
-    surf.blit(val, (x + w // 2 - val.get_width() // 2, y + h + 4))
+    surf.blit(val, (x + w // 2 - val.get_width() // 2, y + h + S(4)))
 
 
 def draw_xy_pad(surf, x, y, size, ax, ay):
     """2-D joystick pad."""
-    pygame.draw.rect(surf, (8, 8, 8), (x, y, size, size), border_radius=3)
-    pygame.draw.rect(surf, ORANGE_DIM, (x, y, size, size), width=1, border_radius=3)
+    pygame.draw.rect(surf, (8, 8, 8), (x, y, size, size), border_radius=S(3))
+    pygame.draw.rect(surf, ORANGE_DIM, (x, y, size, size), width=1, border_radius=S(3))
     cx, cy = x + size // 2, y + size // 2
     # grid lines
     for t in (0.25, 0.5, 0.75):
@@ -206,26 +213,26 @@ def draw_xy_pad(surf, x, y, size, ax, ay):
         pygame.draw.line(surf, (20, 8, 0), (gx, y + 1), (gx, y + size - 1))
         pygame.draw.line(surf, (20, 8, 0), (x + 1, gy), (x + size - 1, gy))
     # crosshair
-    pygame.draw.line(surf, ORANGE_DIM, (cx, y + 2), (cx, y + size - 2))
-    pygame.draw.line(surf, ORANGE_DIM, (x + 2, cy), (x + size - 2, cy))
+    pygame.draw.line(surf, ORANGE_DIM, (cx, y + S(2)), (cx, y + size - S(2)))
+    pygame.draw.line(surf, ORANGE_DIM, (x + S(2), cy), (x + size - S(2), cy))
     # dot
-    dx = cx + int(ax * (size // 2 - 6))
-    dy = cy + int(ay * (size // 2 - 6))
-    pygame.draw.circle(surf, ORANGE_HI, (dx, dy), 6)
-    pygame.draw.circle(surf, ORANGE_GLOW, (dx, dy), 2)
+    dx = cx + int(ax * (size // 2 - S(6)))
+    dy = cy + int(ay * (size // 2 - S(6)))
+    pygame.draw.circle(surf, ORANGE_HI, (dx, dy), S(6))
+    pygame.draw.circle(surf, ORANGE_GLOW, (dx, dy), S(2))
     surf.blit(FONT_XS.render("X/Y", True, ORANGE_DIM),
-              (x + size // 2 - FONT_XS.size("X/Y")[0] // 2, y - 15))
+              (x + size // 2 - FONT_XS.size("X/Y")[0] // 2, y - S(15)))
 
 
 def draw_button_widget(surf, x, y, w, h, pressed, label):
     bg  = ORANGE_DIM if pressed else (8, 8, 8)
     bc  = ORANGE_HI  if pressed else ORANGE_DIM
-    pygame.draw.rect(surf, bg, (x, y, w, h), border_radius=3)
-    pygame.draw.rect(surf, bc, (x, y, w, h), width=1, border_radius=3)
+    pygame.draw.rect(surf, bg, (x, y, w, h), border_radius=S(3))
+    pygame.draw.rect(surf, bc, (x, y, w, h), width=1, border_radius=S(3))
     dot_c = ORANGE_GLOW if pressed else (30, 12, 0)
-    pygame.draw.circle(surf, dot_c, (x + w // 2, y + 9), 4)
+    pygame.draw.circle(surf, dot_c, (x + w // 2, y + S(9)), S(4))
     lbl = FONT_XS.render(label, True, ORANGE_HI if pressed else ORANGE_DIM)
-    surf.blit(lbl, (x + w // 2 - lbl.get_width() // 2, y + 18))
+    surf.blit(lbl, (x + w // 2 - lbl.get_width() // 2, y + S(18)))
 
 
 def draw_pov(surf, cx, cy, size, hat_x, hat_y):
@@ -242,85 +249,81 @@ def draw_pov(surf, cx, cy, size, hat_x, hat_y):
             is_center = (dx == 0 and dy == 0)
             # Note: hat_y > 0 = UP in pygame hat; we show N = up visually
             is_active = (dx, dy) == (active_dir[0], -active_dir[1]) and active_dir != (0,0)
-            rx = cx - size // 2 + col * cell + 2
-            ry = cy - size // 2 + row * cell + 2
-            rw = cell - 4; rh = cell - 4
+            rx = cx - size // 2 + col * cell + S(2)
+            ry = cy - size // 2 + row * cell + S(2)
+            rw = cell - S(4); rh = cell - S(4)
             bg = ORANGE_DIM if is_active else (8, 8, 8)
             bc = ORANGE_HI  if is_active else ORANGE_DIM
-            pygame.draw.rect(surf, bg, (rx, ry, rw, rh), border_radius=2)
-            pygame.draw.rect(surf, bc, (rx, ry, rw, rh), width=1, border_radius=2)
+            pygame.draw.rect(surf, bg, (rx, ry, rw, rh), border_radius=S(2))
+            pygame.draw.rect(surf, bc, (rx, ry, rw, rh), width=1, border_radius=S(2))
             if is_center:
                 pygame.draw.circle(surf,
                     ORANGE_HI if active_dir != (0,0) else (30,12,0),
-                    (rx + rw // 2, ry + rh // 2), 4)
+                    (rx + rw // 2, ry + rh // 2), S(4))
     lbl = FONT_XS.render("POV HAT", True, ORANGE_DIM)
-    surf.blit(lbl, (cx - lbl.get_width() // 2, cy - size // 2 - 16))
+    surf.blit(lbl, (cx - lbl.get_width() // 2, cy - size // 2 - S(16)))
     dir_label = dirs.get((active_dir[0], active_dir[1]), "·")
     d = FONT_MD.render(dir_label, True, ORANGE_HI)
-    surf.blit(d, (cx - d.get_width() // 2, cy + size // 2 + 4))
+    surf.blit(d, (cx - d.get_width() // 2, cy + size // 2 + S(4)))
 
 
 def draw_trigger(surf, cx, cy, pressed):
     c  = RED_ERR    if pressed else (8, 8, 8)
     bc = RED_ERR    if pressed else ORANGE_DIM
-    pygame.draw.circle(surf, c,  (cx, cy), 24)
-    pygame.draw.circle(surf, bc, (cx, cy), 24, width=2)
-    pygame.draw.circle(surf, ORANGE_GLOW if pressed else (30, 12, 0), (cx, cy), 8)
+    pygame.draw.circle(surf, c,  (cx, cy), S(24))
+    pygame.draw.circle(surf, bc, (cx, cy), S(24), width=S(2))
+    pygame.draw.circle(surf, ORANGE_GLOW if pressed else (30, 12, 0), (cx, cy), S(8))
     surf.blit(FONT_XS.render("TRIGGER", True, ORANGE_DIM),
-              (cx - FONT_XS.size("TRIGGER")[0] // 2, cy - 42))
+              (cx - FONT_XS.size("TRIGGER")[0] // 2, cy - S(42)))
     state_lbl = "FIRE" if pressed else "SAFE"
-    s = FONT_XS.render(state_lbl, True, RED_ERR if pressed else ORANGE_DIM)
-    surf.blit(s, (cx - s.get_width() // 2, cy + 30))
+    s_lbl = FONT_XS.render(state_lbl, True, RED_ERR if pressed else ORANGE_DIM)
+    surf.blit(s_lbl, (cx - s_lbl.get_width() // 2, cy + S(30)))
 
 
-def draw_status_badge(surf, connected, name=""):
+def draw_status_badge(surf, cw, connected, name=""):
     color = ORANGE_HI if connected else RED_ERR
     label = "CTRL CONNECTED" if connected else "NO CONTROLLER"
     badge = FONT_XS.render(label, True, color)
-    bw = badge.get_width() + 26
-    bx = BASE_W - bw - 18
-    pygame.draw.rect(surf, (6, 2, 0), (bx, 12, bw, 22), border_radius=2)
-    pygame.draw.rect(surf, color,     (bx, 12, bw, 22), width=1, border_radius=2)
-    pygame.draw.circle(surf, color, (bx + 10, 23), 3)
-    surf.blit(badge, (bx + 18, 17))
+    bw = badge.get_width() + S(26)
+    bx = cw - bw - S(18)
+    pygame.draw.rect(surf, (6, 2, 0), (bx, S(12), bw, S(22)), border_radius=S(2))
+    pygame.draw.rect(surf, color,     (bx, S(12), bw, S(22)), width=1, border_radius=S(2))
+    pygame.draw.circle(surf, color, (bx + S(10), S(23)), S(3))
+    surf.blit(badge, (bx + S(18), S(17)))
     if name and connected:
         n = FONT_XS.render(name[:50], True, ORANGE_DIM)
-        surf.blit(n, (bx, 38))
+        surf.blit(n, (bx, S(38)))
 
 
 # ── Rover command panel ───────────────────────────────────────────────────────
 def draw_rover_panel(surf, rect, motor_states, servo_angle, net_ok, packets_sent):
     draw_panel(surf, rect, "ARM / MOTOR COMMANDS")
-    x0, y0 = rect.x + 14, rect.y + 36
+    x0, y0 = rect.x + S(14), rect.y + S(36)
 
-    col_w = (rect.w - 28) // len(MOTOR_NAMES)
+    col_w = (rect.w - S(28)) // len(MOTOR_NAMES)
     for i, (name, state) in enumerate(zip(MOTOR_NAMES, motor_states)):
         cx = x0 + i * col_w + col_w // 2
-        # label
         lbl = FONT_XS.render(name, True, ORANGE_DIM)
         surf.blit(lbl, (cx - lbl.get_width() // 2, y0))
-        # state box
         sc = ORANGE_HI if state == "FWD" else (RED_ERR if state == "REV" else (25, 10, 0))
         bc = sc if state != "STOP" else ORANGE_DIM
-        bx = cx - 24; by = y0 + 16
-        pygame.draw.rect(surf, (6, 2, 0), (bx, by, 48, 16), border_radius=2)
-        pygame.draw.rect(surf, bc,         (bx, by, 48, 16), width=1, border_radius=2)
+        bx = cx - S(24); by = y0 + S(16)
+        pygame.draw.rect(surf, (6, 2, 0), (bx, by, S(48), S(16)), border_radius=S(2))
+        pygame.draw.rect(surf, bc,         (bx, by, S(48), S(16)), width=1, border_radius=S(2))
         st = FONT_XS.render(state, True, sc)
-        surf.blit(st, (cx - st.get_width() // 2, by + 2))
+        surf.blit(st, (cx - st.get_width() // 2, by + S(2)))
 
-    # Servo bar
-    sy = y0 + 48
+    sy = y0 + S(48)
     surf.blit(FONT_XS.render("SERVO ANGLE", True, ORANGE_DIM), (x0, sy))
-    bar_x = x0 + 90; bar_w = rect.w - 110
-    pygame.draw.rect(surf, (8, 8, 8), (bar_x, sy, bar_w, 12), border_radius=2)
-    pygame.draw.rect(surf, ORANGE_DIM, (bar_x, sy, bar_w, 12), width=1, border_radius=2)
-    fill = int((servo_angle / 180) * (bar_w - 4))
-    pygame.draw.rect(surf, ORANGE_MID, (bar_x + 2, sy + 2, fill, 8), border_radius=2)
+    bar_x = x0 + S(90); bar_w = rect.w - S(110)
+    pygame.draw.rect(surf, (8, 8, 8), (bar_x, sy, bar_w, S(12)), border_radius=S(2))
+    pygame.draw.rect(surf, ORANGE_DIM, (bar_x, sy, bar_w, S(12)), width=1, border_radius=S(2))
+    fill = int((servo_angle / 180) * (bar_w - S(4)))
+    pygame.draw.rect(surf, ORANGE_MID, (bar_x + S(2), sy + S(2), fill, S(8)), border_radius=S(2))
     ang = FONT_XS.render(f"{servo_angle}°", True, ORANGE_HI)
-    surf.blit(ang, (bar_x + bar_w + 6, sy))
+    surf.blit(ang, (bar_x + bar_w + S(6), sy))
 
-    # Network line
-    ny = sy + 22
+    ny = sy + S(22)
     nc = ORANGE_HI if net_ok else RED_ERR
     surf.blit(FONT_XS.render(
         f"UDP  {ROVER_IP}:{ROVER_PORT}   pkts:{packets_sent}",
@@ -330,44 +333,41 @@ def draw_rover_panel(surf, rect, motor_states, servo_angle, net_ok, packets_sent
 # ── Wheel drive panel ─────────────────────────────────────────────────────────
 def draw_wheel_panel(surf, rect, x_val, z_val, throttle_pct, net_ok, pkts):
     draw_panel(surf, rect, "WHEEL DRIVE")
-    x0, y0 = rect.x + 14, rect.y + 36
-    bar_w  = rect.w - 110
+    x0, y0 = rect.x + S(14), rect.y + S(36)
+    bar_w  = rect.w - S(110)
 
     def row(label, value, y):
         surf.blit(FONT_XS.render(label, True, ORANGE_DIM), (x0, y))
-        draw_axis_bar(surf, x0 + 95, y, bar_w, 12, value, show_val=True)
+        draw_axis_bar(surf, x0 + S(95), y, bar_w, S(12), value, show_val=True)
 
     row("FWD/REV",  x_val,    y0)
-    row("TURN",     z_val,    y0 + 20)
+    row("TURN",     z_val,    y0 + S(20))
 
-    # Throttle
-    ty = y0 + 40
+    ty = y0 + S(40)
     surf.blit(FONT_XS.render("THROTTLE", True, ORANGE_DIM), (x0, ty))
-    bx = x0 + 95
-    pygame.draw.rect(surf, (8, 8, 8),   (bx, ty, bar_w, 12), border_radius=2)
-    pygame.draw.rect(surf, ORANGE_DIM,  (bx, ty, bar_w, 12), width=1, border_radius=2)
-    fill = int(throttle_pct * (bar_w - 4))
+    bx = x0 + S(95)
+    pygame.draw.rect(surf, (8, 8, 8),   (bx, ty, bar_w, S(12)), border_radius=S(2))
+    pygame.draw.rect(surf, ORANGE_DIM,  (bx, ty, bar_w, S(12)), width=1, border_radius=S(2))
+    fill = int(throttle_pct * (bar_w - S(4)))
     if fill > 0:
-        pygame.draw.rect(surf, ORANGE_MID, (bx + 2, ty + 2, fill, 8), border_radius=2)
+        pygame.draw.rect(surf, ORANGE_MID, (bx + S(2), ty + S(2), fill, S(8)), border_radius=S(2))
     surf.blit(FONT_XS.render(f"{int(throttle_pct*100)}%", True, ORANGE_HI),
-              (bx + bar_w + 6, ty))
+              (bx + bar_w + S(6), ty))
 
-    # Differential
     lv = max(-1.0, min(1.0, x_val - z_val)) * throttle_pct
     rv = max(-1.0, min(1.0, x_val + z_val)) * throttle_pct
-    row("LEFT  MTR", lv, ty + 20)
-    row("RIGHT MTR", rv, ty + 40)
+    row("LEFT  MTR", lv, ty + S(20))
+    row("RIGHT MTR", rv, ty + S(40))
 
-    # Net
     nc = ORANGE_HI if net_ok else RED_ERR
     surf.blit(FONT_XS.render(
         f"UDP  {ROVER_IP}:{WHEEL_PORT}   pkts:{pkts}", True, nc),
-        (x0, ty + 62))
+        (x0, ty + S(62)))
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
-    global FONT_XS, FONT_SM, FONT_MD, FONT_LG
+    global FONT_XS, FONT_SM, FONT_MD, FONT_LG, _s
 
     pygame.init()
 
@@ -377,22 +377,26 @@ def main():
     pygame.display.set_caption("Extreme 3D Pro — Rover Arm Control")
     clock = pygame.time.Clock()
 
-    # Fixed-resolution canvas we always draw to, then scale once
-    canvas = pygame.Surface((BASE_W, BASE_H))
+    # Determine available monospace font
+    _font_name = None
+    for name in ("couriernew", "courier new", "monospace"):
+        try:
+            pygame.font.SysFont(name, 12)
+            _font_name = name
+            break
+        except Exception:
+            continue
 
-    def load_fonts():
+    def load_fonts(scale):
         global FONT_XS, FONT_SM, FONT_MD, FONT_LG
-        for name in ("couriernew", "courier new", "monospace"):
-            try:
-                FONT_XS = pygame.font.SysFont(name, 12, bold=True)
-                FONT_SM = pygame.font.SysFont(name, 13, bold=True)
-                FONT_MD = pygame.font.SysFont(name, 18, bold=True)
-                FONT_LG = pygame.font.SysFont(name, 24, bold=True)
-                break
-            except Exception:
-                continue
+        FONT_XS = pygame.font.SysFont(_font_name, max(8,  round(12 * scale)), bold=True)
+        FONT_SM = pygame.font.SysFont(_font_name, max(9,  round(13 * scale)), bold=True)
+        FONT_MD = pygame.font.SysFont(_font_name, max(12, round(18 * scale)), bold=True)
+        FONT_LG = pygame.font.SysFont(_font_name, max(14, round(24 * scale)), bold=True)
 
-    load_fonts()
+    load_fonts(1.0)
+    canvas = pygame.Surface((BASE_W, BASE_H))
+    prev_scale = 1.0
 
     pygame.joystick.init()
 
@@ -545,69 +549,79 @@ def main():
             wheels.send_drive(wheel_x, wheel_z, wheel_thr)
             wheel_pkts_sent += 1
 
-        # ─────────────── DRAW on fixed canvas ────────────────────────────
+        # ─────────────── DRAW at native resolution ──────────────────────
+        _s = min(W / BASE_W, H / BASE_H)
+        cw, ch = S(BASE_W), S(BASE_H)
+
+        if abs(_s - prev_scale) > 0.005:
+            prev_scale = _s
+            load_fonts(_s)
+            canvas = pygame.Surface((cw, ch))
+        elif canvas.get_size() != (cw, ch):
+            canvas = pygame.Surface((cw, ch))
+
         canvas.fill(BG)
 
         # ── Header ───────────────────────────────────────────────────────
         title = FONT_LG.render("EXTREME 3D PRO  //  ROVER ARM CONTROL", True, ORANGE_HI)
-        canvas.blit(title, (16, 12))
-        draw_status_badge(canvas, connected, joy_name)
-        draw_hline(canvas, 16, 44, BASE_W - 32)
+        canvas.blit(title, (S(16), S(12)))
+        draw_status_badge(canvas, cw, connected, joy_name)
+        draw_hline(canvas, S(16), S(44), cw - S(32))
 
         # ── LEFT PANEL: Axes ──────────────────────────────────────────────
-        LP = pygame.Rect(14, 52, 440, 360)
+        LP = pygame.Rect(S(14), S(52), S(440), S(370))
         draw_panel(canvas, LP, "AXES & STICK")
 
-        ay = LP.y + 40
-        draw_axis_bar(canvas, LP.x+14, ay,     LP.w-28, 14, ax_x, "X AXIS   L/R")
-        draw_axis_bar(canvas, LP.x+14, ay+42,  LP.w-28, 14, ax_y, "Y AXIS   FWD/BACK")
-        draw_axis_bar(canvas, LP.x+14, ay+84,  LP.w-28, 14, ax_z, "Z TWIST  RUDDER")
+        ay = LP.y + S(40)
+        draw_axis_bar(canvas, LP.x+S(14), ay,       LP.w-S(28), S(14), ax_x, "X AXIS   L/R")
+        draw_axis_bar(canvas, LP.x+S(14), ay+S(42), LP.w-S(28), S(14), ax_y, "Y AXIS   FWD/BACK")
+        draw_axis_bar(canvas, LP.x+S(14), ay+S(84), LP.w-S(28), S(14), ax_z, "Z TWIST  RUDDER")
 
-        draw_xy_pad(canvas, LP.x + 14, ay + 126, 140, ax_x, ax_y)
-        draw_throttle_v(canvas, LP.x + 172, ay + 126, 34, 140, ax_t)
+        draw_xy_pad(canvas, LP.x + S(14), ay + S(126), S(140), ax_x, ax_y)
+        draw_throttle_v(canvas, LP.x + S(172), ay + S(126), S(34), S(140), ax_t)
 
         # Raw values strip
-        raw_y = ay + 286
-        rr = pygame.Rect(LP.x + 14, raw_y, LP.w - 28, 42)
-        pygame.draw.rect(canvas, (6, 2, 0), rr, border_radius=2)
-        pygame.draw.rect(canvas, ORANGE_DIM, rr, width=1, border_radius=2)
+        raw_y = ay + S(286)
+        rr = pygame.Rect(LP.x + S(14), raw_y, LP.w - S(28), S(42))
+        pygame.draw.rect(canvas, (6, 2, 0), rr, border_radius=S(2))
+        pygame.draw.rect(canvas, ORANGE_DIM, rr, width=1, border_radius=S(2))
         canvas.blit(FONT_XS.render("RAW AXIS VALUES", True, ORANGE_MID),
-                    (rr.x + 8, rr.y + 4))
+                    (rr.x + S(8), rr.y + S(4)))
         for i, (n, v) in enumerate(zip(["AX0","AX1","AX2","AX3"],
                                         [ax_x, ax_y, ax_z, ax_t])):
-            rx = rr.x + 10 + i * (rr.w // 4)
-            canvas.blit(FONT_XS.render(n, True, ORANGE_DIM), (rx, rr.y + 17))
-            canvas.blit(FONT_XS.render(f"{v:+.4f}", True, ORANGE_HI), (rx, rr.y + 28))
+            rx = rr.x + S(10) + i * (rr.w // 4)
+            canvas.blit(FONT_XS.render(n, True, ORANGE_DIM), (rx, rr.y + S(17)))
+            canvas.blit(FONT_XS.render(f"{v:+.4f}", True, ORANGE_HI), (rx, rr.y + S(28)))
 
         # ── RIGHT PANEL: Buttons ──────────────────────────────────────────
-        RP = pygame.Rect(466, 52, 480, 360)
+        RP = pygame.Rect(S(466), S(52), S(480), S(370))
         draw_panel(canvas, RP, "BUTTONS")
 
-        bw, bh = 98, 42
-        bx0 = RP.x + 14; by0 = RP.y + 40
+        bw, bh = S(98), S(42)
+        bx0 = RP.x + S(14); by0 = RP.y + S(40)
         for i in range(min(12, len(BUTTON_LABELS))):
             col = i % 4; row = i // 4
-            bx = bx0 + col * (bw + 6)
-            by = by0 + row * (bh + 8)
+            bx = bx0 + col * (bw + S(6))
+            by = by0 + row * (bh + S(8))
             pressed = buttons[i] if i < len(buttons) else False
             draw_button_widget(canvas, bx, by, bw, bh, pressed, BUTTON_LABELS[i])
 
-        pov_cy = RP.y + 295
-        draw_pov(canvas, RP.x + 110, pov_cy, 90, hat_x, hat_y)
-        draw_trigger(canvas, RP.x + 340, pov_cy,
+        pov_cy = RP.y + S(295)
+        draw_pov(canvas, RP.x + S(110), pov_cy, S(90), hat_x, hat_y)
+        draw_trigger(canvas, RP.x + S(340), pov_cy,
                      buttons[0] if len(buttons) > 0 else False)
 
-        draw_hline(canvas, 14, 422, BASE_W - 28)
+        draw_hline(canvas, S(14), S(430), cw - S(28))
 
         # ── ROVER ARM PANEL ───────────────────────────────────────────────
-        CP = pygame.Rect(14, 428, 930, 112)
+        CP = pygame.Rect(S(14), S(436), S(930), S(112))
         net_ok = not bool(arm.last_error)
         draw_rover_panel(canvas, CP, motor_states, servo_angle, net_ok, packets_sent)
 
-        draw_hline(canvas, 14, 548, BASE_W - 28)
+        draw_hline(canvas, S(14), S(556), cw - S(28))
 
         # ── WHEEL DRIVE PANEL ─────────────────────────────────────────────
-        WP = pygame.Rect(14, 554, 930, 118)
+        WP = pygame.Rect(S(14), S(562), S(930), S(150))
         wheel_net_ok = not bool(wheels.last_error)
         draw_wheel_panel(canvas, WP, wheel_x, wheel_z, wheel_thr,
                          wheel_net_ok, wheel_pkts_sent)
@@ -616,22 +630,13 @@ def main():
         foot = FONT_XS.render(
             "ESC: quit   B9/B10: servo ▲▼   B3-B8: motors   HAT: motors 1/2",
             True, ORANGE_MID)
-        canvas.blit(foot, (BASE_W // 2 - foot.get_width() // 2, BASE_H - 14))
+        canvas.blit(foot, (cw // 2 - foot.get_width() // 2, ch - S(20)))
 
-        # ── Scale canvas to current window size (integer-aware) ───────────
-        # Use smoothscale for non-integer scales but only if window differs
-        if (W, H) != (BASE_W, BASE_H):
-            # Maintain aspect ratio with letterboxing
-            scale = min(W / BASE_W, H / BASE_H)
-            out_w = int(BASE_W * scale)
-            out_h = int(BASE_H * scale)
-            scaled = pygame.transform.smoothscale(canvas, (out_w, out_h))
-            screen.fill(BG)
-            ox = (W - out_w) // 2
-            oy = (H - out_h) // 2
-            screen.blit(scaled, (ox, oy))
-        else:
-            screen.blit(canvas, (0, 0))
+        # ── Blit canvas to screen (already at native resolution) ──────────
+        screen.fill(BG)
+        ox = (W - cw) // 2
+        oy = (H - ch) // 2
+        screen.blit(canvas, (ox, oy))
 
         pygame.display.flip()
         clock.tick(60)
