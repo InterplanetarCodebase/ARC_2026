@@ -2,8 +2,9 @@
 """
 SENTINEL — GStreamer Multi-Camera GUI Receiver
 Jetson-optimized. Auto-detects decoder.
-4×4 grid view with per-feed FPS / ping / port overlay.
+Chrome-like tabbed interface with per-feed FPS / ping / port overlay.
 Click any tile to maximize; ESC or button to return to grid.
+Right-click any feed to add to tabs or pop out into separate windows.
 """
 
 import gi
@@ -90,8 +91,8 @@ class CameraBackend:
         self._last_frame  = None
         self._frame_lock  = threading.Lock()
 
-        self.on_new_frame    = None
-        self.on_stats_update = None
+        self._frame_listeners = []
+        self._stats_listeners = []
 
     # ── Build pipeline ────────────────────────────────────────────────────────
     def build(self):
@@ -173,11 +174,11 @@ class CameraBackend:
             self._frame_count = 0
             self._fps_ts      = now
             self.status       = "streaming"
-            if self.on_stats_update:
-                GLib.idle_add(self.on_stats_update, self.camera_id)
+            for _cb in list(self._stats_listeners):
+                GLib.idle_add(_cb, self.camera_id)
 
-        if self.on_new_frame:
-            GLib.idle_add(self.on_new_frame, self.camera_id)
+        for _cb in list(self._frame_listeners):
+            GLib.idle_add(_cb, self.camera_id)
 
         return Gst.FlowReturn.OK
 
@@ -189,8 +190,8 @@ class CameraBackend:
     def _ping_loop(self):
         while self.running:
             self.ping_ms = ping_once(self.host, timeout=2)
-            if self.on_stats_update:
-                GLib.idle_add(self.on_stats_update, self.camera_id)
+            for _cb in list(self._stats_listeners):
+                GLib.idle_add(_cb, self.camera_id)
             time.sleep(3)
 
     # ── Bus ──────────────────────────────────────────────────────────────────
@@ -200,8 +201,8 @@ class CameraBackend:
             err, dbg = message.parse_error()
             print(f"[cam{self.camera_id}] ERR: {err} | {dbg}")
             self.status = "error"
-            if self.on_stats_update:
-                GLib.idle_add(self.on_stats_update, self.camera_id)
+            for _cb in list(self._stats_listeners):
+                GLib.idle_add(_cb, self.camera_id)
         elif t == Gst.MessageType.EOS:
             self.status = "stopped"
 
@@ -235,8 +236,17 @@ class CameraTile(Gtk.DrawingArea):
         self.connect("enter-notify-event", lambda w, e: self._hover(True))
         self.connect("leave-notify-event", lambda w, e: self._hover(False))
 
-        backend.on_new_frame    = lambda cid: self.queue_draw()
-        backend.on_stats_update = lambda cid: self.queue_draw()
+        self._frame_cb = lambda cid: self.queue_draw()
+        self._stats_cb = lambda cid: self.queue_draw()
+        backend._frame_listeners.append(self._frame_cb)
+        backend._stats_listeners.append(self._stats_cb)
+        self.connect("destroy", self._on_tile_destroy)
+
+    def _on_tile_destroy(self, widget):
+        if self._frame_cb in self.backend._frame_listeners:
+            self.backend._frame_listeners.remove(self._frame_cb)
+        if self._stats_cb in self.backend._stats_listeners:
+            self.backend._stats_listeners.remove(self._stats_cb)
 
     def _hover(self, v):
         self.hovered = v
@@ -444,6 +454,258 @@ class CameraTile(Gtk.DrawingArea):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  Tab Label  (Chrome-style: name + close button, double-click to rename)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TabLabel(Gtk.Box):
+    """Chrome-like tab label with close button. Double-click to rename."""
+
+    def __init__(self, name, closeable=True, on_close=None, on_rename=None):
+        super().__init__(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        self.tab_name    = name
+        self._on_rename  = on_rename
+
+        self.evbox = Gtk.EventBox()
+        self.evbox.set_visible_window(False)
+        self.label = Gtk.Label(label=name)
+        self.label.get_style_context().add_class("tab-label")
+        self.evbox.add(self.label)
+        self.evbox.add_events(Gdk.EventMask.BUTTON_PRESS_MASK)
+        self.evbox.connect("button-press-event", self._on_press)
+        self.pack_start(self.evbox, True, True, 0)
+
+        if closeable:
+            btn = Gtk.Button(label="×")
+            btn.get_style_context().add_class("tab-close")
+            btn.set_relief(Gtk.ReliefStyle.NONE)
+            btn.connect("clicked", lambda _: on_close() if on_close else None)
+            self.pack_start(btn, False, False, 0)
+
+        self.show_all()
+
+    def _on_press(self, widget, event):
+        if event.type == Gdk.EventType._2BUTTON_PRESS:
+            self._start_rename()
+            return True
+        return False
+
+    def _start_rename(self):
+        dialog = Gtk.Dialog(
+            title="Rename Tab",
+            transient_for=self.get_toplevel(),
+            flags=Gtk.DialogFlags.MODAL | Gtk.DialogFlags.DESTROY_WITH_PARENT,
+        )
+        dialog.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
+                           "Rename", Gtk.ResponseType.OK)
+        dialog.set_default_response(Gtk.ResponseType.OK)
+
+        entry = Gtk.Entry()
+        entry.set_text(self.tab_name)
+        entry.set_activates_default(True)
+        content = dialog.get_content_area()
+        content.set_margin_start(12)
+        content.set_margin_end(12)
+        content.set_margin_top(8)
+        content.set_margin_bottom(8)
+        content.pack_start(entry, True, True, 0)
+        dialog.show_all()
+
+        if dialog.run() == Gtk.ResponseType.OK:
+            new_name = entry.get_text().strip()
+            if new_name:
+                self.tab_name = new_name
+                self.label.set_text(new_name)
+                if self._on_rename:
+                    self._on_rename(new_name)
+        dialog.destroy()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Tab Page  (independent camera grid with per-tab maximize)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TabPage(Gtk.Box):
+    """Tab page with its own camera grid and maximize support."""
+    COLS = 4
+
+    def __init__(self, app, name, camera_ids=None, is_main=False):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL)
+        self.app        = app
+        self.name       = name
+        self.camera_ids = list(camera_ids) if camera_ids else []
+        self.is_main    = is_main
+        self.tiles      = {}
+        self.max_id     = None
+        self.max_tile   = None
+
+        # Stack for grid / maximized views
+        self.stack = Gtk.Stack()
+        self.stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
+        self.stack.set_transition_duration(200)
+        self.pack_start(self.stack, True, True, 0)
+
+        self.grid = Gtk.Grid()
+        self.grid.set_row_spacing(3)
+        self.grid.set_column_spacing(3)
+        self.grid.set_margin_top(3)
+        self.grid.set_margin_bottom(3)
+        self.grid.set_margin_start(3)
+        self.grid.set_margin_end(3)
+        self.grid.set_column_homogeneous(True)
+        self.grid.set_row_homogeneous(True)
+        self.stack.add_named(self.grid, "grid")
+
+        self.max_box = Gtk.Box()
+        self.max_box.set_hexpand(True)
+        self.max_box.set_vexpand(True)
+        self.stack.add_named(self.max_box, "max")
+
+        self.stack.set_visible_child_name("grid")
+        self.rebuild_grid()
+
+    # ── Grid ──────────────────────────────────────────────────────────────────
+    def rebuild_grid(self):
+        for child in self.grid.get_children():
+            child.destroy()
+        self.tiles.clear()
+
+        n = len(self.camera_ids)
+        if n == 0:
+            lbl = Gtk.Label()
+            lbl.set_markup(
+                '<span font_family="Courier New" size="11000" '
+                'foreground="#4a3010">Right-click a camera to add it here</span>'
+            )
+            lbl.set_justify(Gtk.Justification.CENTER)
+            lbl.set_valign(Gtk.Align.CENTER)
+            lbl.set_halign(Gtk.Align.CENTER)
+            lbl.set_hexpand(True)
+            lbl.set_vexpand(True)
+            self.grid.attach(lbl, 0, 0, 1, 1)
+            self.grid.show_all()
+            return
+
+        cols = min(self.COLS, n)
+        for idx, cam_id in enumerate(self.camera_ids):
+            if cam_id >= len(self.app.backends):
+                continue
+            be   = self.app.backends[cam_id]
+            tile = CameraTile(be)
+            tile.set_size_request(160, 120)
+            tile.set_hexpand(True)
+            tile.set_vexpand(True)
+            tile.set_halign(Gtk.Align.FILL)
+            tile.set_valign(Gtk.Align.FILL)
+            tile.connect("button-press-event",
+                         lambda w, e, i=cam_id: self._on_tile_click(w, e, i))
+
+            col = idx % cols
+            row = idx // cols
+            self.grid.attach(tile, col, row, 1, 1)
+            self.tiles[cam_id] = tile
+
+        self.grid.show_all()
+
+    def _on_tile_click(self, widget, event, camera_id):
+        if event.button == 3:  # right-click → context menu
+            self.app.show_context_menu(event, camera_id, self)
+            return True
+        elif event.button == 1:  # left-click → maximize / restore
+            if self.max_id == camera_id:
+                self.restore_grid()
+            else:
+                self.maximize(camera_id)
+            return True
+        return False
+
+    # ── Maximize / Restore ────────────────────────────────────────────────────
+    def maximize(self, camera_id):
+        self.max_id = camera_id
+        for cid, t in self.tiles.items():
+            t.maximized = (cid == camera_id)
+            t.queue_draw()
+
+        for child in self.max_box.get_children():
+            child.destroy()
+
+        be  = self.app.backends[camera_id]
+        big = CameraTile(be, is_large=True)
+        big.maximized = True
+        big.set_hexpand(True)
+        big.set_vexpand(True)
+        big.set_halign(Gtk.Align.FILL)
+        big.set_valign(Gtk.Align.FILL)
+        self.max_tile = big
+        self.max_box.pack_start(big, True, True, 0)
+        big.show()
+
+        self.stack.set_visible_child_name("max")
+        self.app.back_btn.show()
+        self.app.status_lbl.set_text(
+            f"MAXIMIZED  ─  CAM {camera_id:02d}  ─  PORT {self.app.ports[camera_id]}"
+            f"   [ESC or GRID VIEW to return]"
+        )
+
+    def restore_grid(self):
+        self.max_id   = None
+        self.max_tile = None
+
+        for child in self.max_box.get_children():
+            child.destroy()
+
+        for t in self.tiles.values():
+            t.maximized = False
+            t.queue_draw()
+
+        self.stack.set_visible_child_name("grid")
+        self.app.back_btn.hide()
+        self.app.status_lbl.set_text(
+            f"TAB: {self.name}  ─  {len(self.camera_ids)} FEED(S)"
+        )
+
+    # ── Add / Remove cameras ─────────────────────────────────────────────────
+    def add_camera(self, camera_id):
+        if camera_id not in self.camera_ids:
+            self.camera_ids.append(camera_id)
+            self.rebuild_grid()
+
+    def remove_camera(self, camera_id):
+        if camera_id in self.camera_ids:
+            self.camera_ids.remove(camera_id)
+            if self.max_id == camera_id:
+                self.restore_grid()
+            self.rebuild_grid()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Pop-Out Window  (standalone floating camera window)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class PopOutWindow(Gtk.Window):
+    """Standalone floating window for a single camera feed."""
+
+    def __init__(self, app, camera_id):
+        be = app.backends[camera_id]
+        super().__init__(title=f"CAM {camera_id:02d}  ─  :{be.port}")
+        self.app       = app
+        self.camera_id = camera_id
+
+        self.set_default_size(640, 480)
+
+        tile = CameraTile(be, is_large=True)
+        tile.set_hexpand(True)
+        tile.set_vexpand(True)
+        self.add(tile)
+
+        self.connect("destroy", self._on_destroy)
+        self.show_all()
+
+    def _on_destroy(self, widget):
+        if self in self.app.popout_windows:
+            self.app.popout_windows.remove(self)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  Main Application Window
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -464,6 +726,27 @@ window          { background: #060a0f; }
 #statusbar      { background: #040608; border-top: 1px solid #1a0e00; padding: 0 12px; }
 #status-lbl     { font-family: "Courier New"; font-size: 10px; color: #4a2e10; }
 #clock-lbl      { font-family: "Courier New"; font-size: 10px; color: #4a2e10; }
+notebook        { background: #060a0f; }
+notebook header { background: #070d14; }
+notebook tab    { background: #0a0e14; border: 1px solid #1a0e00;
+                  padding: 4px 6px; font-family: "Courier New"; font-size: 11px;
+                  color: #8a6020; min-height: 0; }
+notebook tab:checked { background: #121820; border-bottom: 2px solid #ff8800;
+                       color: #ff8800; }
+notebook tab:hover   { background: #151a22; color: #cc7700; }
+.tab-label      { font-family: "Courier New"; font-size: 11px; }
+.tab-close      { font-size: 14px; color: #5a3a10;
+                  background: transparent; border: none; padding: 0 2px;
+                  min-width: 16px; min-height: 16px; }
+.tab-close:hover { color: #ff4400; }
+.tab-add        { font-family: "Courier New"; font-size: 16px; color: #5a3a10;
+                  background: transparent; border: 1px solid #1a0e00;
+                  border-radius: 3px; padding: 2px 8px; margin: 2px 4px; }
+.tab-add:hover  { color: #ff8800; border-color: #3a1800; background: #0e1218; }
+menu            { background: #0c1018; border: 1px solid #2a1800; }
+menuitem        { font-family: "Courier New"; font-size: 11px; color: #cc7700;
+                  padding: 4px 12px; }
+menuitem:hover  { background: #1a1200; }
 """
 
 
@@ -477,10 +760,9 @@ class ReceiverApp(Gtk.Window):
         self.height   = height
         self.host     = host
 
-        self.backends  = []
-        self.tiles     = []       # grid tiles
-        self.max_tile  = None     # large tile in maximized view
-        self.max_id    = None     # currently maximized camera_id
+        self.backends       = []
+        self.tab_pages      = []
+        self.popout_windows = []
 
         Gst.init(None)
         self._apply_css()
@@ -535,34 +817,24 @@ class ReceiverApp(Gtk.Window):
         self.back_btn.set_name("back-btn")
         self.back_btn.set_valign(Gtk.Align.CENTER)
         self.back_btn.set_no_show_all(True)
-        self.back_btn.connect("clicked", lambda _: self._restore_grid())
+        self.back_btn.connect("clicked", lambda _: self._restore_current_grid())
         hdr.pack_start(self.back_btn, False, False, 0)
 
         root.pack_start(hdr, False, False, 0)
 
-        # Stack
-        self.stack = Gtk.Stack()
-        self.stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
-        self.stack.set_transition_duration(200)
-        root.pack_start(self.stack, True, True, 0)
+        # Notebook (Chrome-like tabs)
+        self.notebook = Gtk.Notebook()
+        self.notebook.set_scrollable(True)
+        self.notebook.connect("switch-page", self._on_tab_switch)
+        root.pack_start(self.notebook, True, True, 0)
 
-        # Grid page — grid fills all available space, no scroll
-        self.grid_outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        self.grid = Gtk.Grid()
-        self.grid.set_row_spacing(3)
-        self.grid.set_column_spacing(3)
-        self.grid.set_margin_top(3); self.grid.set_margin_bottom(3)
-        self.grid.set_margin_start(3); self.grid.set_margin_end(3)
-        self.grid.set_column_homogeneous(True)
-        self.grid.set_row_homogeneous(True)
-        self.grid_outer.pack_start(self.grid, True, True, 0)
-        self.stack.add_named(self.grid_outer, "grid")
-
-        # Maximized page
-        self.max_box = Gtk.Box()
-        self.max_box.set_hexpand(True)
-        self.max_box.set_vexpand(True)
-        self.stack.add_named(self.max_box, "max")
+        # "+" button to add new tabs
+        add_btn = Gtk.Button(label="+")
+        add_btn.get_style_context().add_class("tab-add")
+        add_btn.set_tooltip_text("New Tab")
+        add_btn.connect("clicked", lambda _: self._create_new_tab_dialog())
+        add_btn.show()
+        self.notebook.set_action_widget(add_btn, Gtk.PackType.END)
 
         # Status bar
         sb = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
@@ -578,8 +850,6 @@ class ReceiverApp(Gtk.Window):
         sb.pack_end  (self.clock_lbl,  False, False, 0)
         root.pack_end(sb, False, False, 0)
 
-        self.stack.set_visible_child_name("grid")
-
     # ── Streams ───────────────────────────────────────────────────────────────
     def _init_streams(self):
         decoder = detect_decoder()
@@ -587,105 +857,173 @@ class ReceiverApp(Gtk.Window):
             self.status_lbl.set_text("ERROR: No H.264 decoder found! Install gstreamer1.0-libav")
             return
 
-        # Calculate how many columns to use (max COLS, but fewer if fewer cameras)
-        n = len(self.ports)
-        cols = min(self.COLS, n)
-        rows = math.ceil(n / cols) if cols > 0 else 1
-
+        all_ids = []
         for idx, port in enumerate(self.ports):
             be = CameraBackend(idx, port, self.width, self.height, decoder, self.host)
             if not be.build():
                 continue
-
-            tile = CameraTile(be)
-            # Minimum size so tiny windows are still usable; actual size is dynamic
-            tile.set_size_request(160, 120)
-            # Expand to fill all available space in the grid cell
-            tile.set_hexpand(True)
-            tile.set_vexpand(True)
-            tile.set_halign(Gtk.Align.FILL)
-            tile.set_valign(Gtk.Align.FILL)
-            tile.connect("button-press-event",
-                         lambda w, e, i=idx: self._on_tile_click(i))
-
-            col = idx % self.COLS
-            row = idx // self.COLS
-            self.grid.attach(tile, col, row, 1, 1)
-
             self.backends.append(be)
-            self.tiles.append(tile)
+            all_ids.append(idx)
             be.start()
 
-        self.grid.show_all()
+        # Default "All Cameras" tab
+        self._add_tab("All Cameras", all_ids, is_main=True, closeable=False)
+
         self.status_lbl.set_text(
             f"SYSTEM ONLINE  ─  {len(self.backends)} PIPELINE(S) ACTIVE  ─  "
-            f"Click any feed to maximize  ─  ESC to return"
+            f"Right-click any feed to manage tabs"
         )
 
-    # ── Maximize / Restore ───────────────────────────────────────────────────
-    def _on_tile_click(self, camera_id):
-        if self.max_id == camera_id:
-            self._restore_grid()
-        else:
-            self._maximize(camera_id)
+    # ── Tab management ────────────────────────────────────────────────────────
+    def _add_tab(self, name, camera_ids=None, is_main=False, closeable=True):
+        page = TabPage(self, name, camera_ids, is_main)
+        self.tab_pages.append(page)
 
-    def _maximize(self, camera_id):
-        self.max_id = camera_id
-
-        # Highlight grid tile
-        for t in self.tiles:
-            t.maximized = (t.backend.camera_id == camera_id)
-            t.queue_draw()
-
-        # Remove old max tile
-        for child in self.max_box.get_children():
-            self.max_box.remove(child)
-
-        # Create big tile — expand to fill entire area
-        be = self.backends[camera_id]
-        big = CameraTile(be, is_large=True)
-        big.maximized = True
-        big.set_hexpand(True)
-        big.set_vexpand(True)
-        big.set_halign(Gtk.Align.FILL)
-        big.set_valign(Gtk.Align.FILL)
-        be.on_new_frame    = lambda cid: big.queue_draw()
-        be.on_stats_update = lambda cid: big.queue_draw()
-        self.max_tile = big
-        self.max_box.pack_start(big, True, True, 0)
-        big.show()
-
-        self.stack.set_visible_child_name("max")
-        self.back_btn.show()
-        self.status_lbl.set_text(
-            f"MAXIMIZED  ─  CAM {camera_id:02d}  ─  PORT {self.ports[camera_id]}"
-            f"   [ESC or GRID VIEW to return]"
+        tab_label = TabLabel(
+            name,
+            closeable=closeable,
+            on_close=lambda p=page: self._close_tab(p),
+            on_rename=lambda new_name, p=page: setattr(p, 'name', new_name),
         )
 
-    def _restore_grid(self):
-        self.max_id   = None
-        self.max_tile = None
+        idx = self.notebook.append_page(page, tab_label)
+        page.show_all()
+        self.notebook.set_tab_reorderable(page, True)
+        self.notebook.set_current_page(idx)
+        return page
 
-        for be in self.backends:
-            # Find matching grid tile and re-hook callbacks
-            for t in self.tiles:
-                if t.backend is be:
-                    be.on_new_frame    = lambda cid, ti=t: ti.queue_draw()
-                    be.on_stats_update = lambda cid, ti=t: ti.queue_draw()
-                    break
+    def _close_tab(self, page):
+        if page.max_id is not None:
+            page.restore_grid()
+        idx = self.notebook.page_num(page)
+        if idx >= 0:
+            self.notebook.remove_page(idx)
+        if page in self.tab_pages:
+            self.tab_pages.remove(page)
+        page.destroy()
 
-        for t in self.tiles:
-            t.maximized = False
-            t.queue_draw()
+    def _create_new_tab_dialog(self):
+        dialog = Gtk.Dialog(
+            title="New Tab",
+            transient_for=self,
+            flags=Gtk.DialogFlags.MODAL | Gtk.DialogFlags.DESTROY_WITH_PARENT,
+        )
+        dialog.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
+                           "Create", Gtk.ResponseType.OK)
+        dialog.set_default_response(Gtk.ResponseType.OK)
 
-        for child in self.max_box.get_children():
-            self.max_box.remove(child)
+        content = dialog.get_content_area()
+        content.set_margin_start(12)
+        content.set_margin_end(12)
+        content.set_margin_top(8)
+        content.set_margin_bottom(8)
+        content.set_spacing(8)
 
-        self.stack.set_visible_child_name("grid")
+        lbl = Gtk.Label(label="Tab Name:")
+        lbl.set_halign(Gtk.Align.START)
+        content.pack_start(lbl, False, False, 0)
+
+        entry = Gtk.Entry()
+        entry.set_text("New Tab")
+        entry.set_activates_default(True)
+        content.pack_start(entry, False, False, 0)
+
+        dialog.show_all()
+
+        if dialog.run() == Gtk.ResponseType.OK:
+            name = entry.get_text().strip()
+            if name:
+                self._add_tab(name)
+        dialog.destroy()
+
+    # ── Context menu (right-click on camera tile) ─────────────────────────────
+    def show_context_menu(self, event, camera_id, source_page):
+        menu = Gtk.Menu()
+
+        # Pop out into separate window
+        item = Gtk.MenuItem(label=f"\u2b17  Pop Out CAM {camera_id:02d}")
+        item.connect("activate", lambda _: self._popout_camera(camera_id))
+        menu.append(item)
+
+        menu.append(Gtk.SeparatorMenuItem())
+
+        # Existing custom tabs
+        for page in self.tab_pages:
+            if page.is_main:
+                continue
+            if camera_id in page.camera_ids:
+                item = Gtk.MenuItem(label=f"\u2715  Remove from \"{page.name}\"")
+                item.connect("activate",
+                             lambda _, p=page: p.remove_camera(camera_id))
+                menu.append(item)
+            else:
+                item = Gtk.MenuItem(label=f"\uff0b  Add to \"{page.name}\"")
+                item.connect("activate",
+                             lambda _, p=page: p.add_camera(camera_id))
+                menu.append(item)
+
+        menu.append(Gtk.SeparatorMenuItem())
+
+        # Add to new tab
+        item = Gtk.MenuItem(label="\uff0b  Add to New Tab...")
+        item.connect("activate", lambda _: self._add_to_new_tab(camera_id))
+        menu.append(item)
+
+        menu.show_all()
+        menu.popup_at_pointer(event)
+
+    def _add_to_new_tab(self, camera_id):
+        dialog = Gtk.Dialog(
+            title="New Tab",
+            transient_for=self,
+            flags=Gtk.DialogFlags.MODAL | Gtk.DialogFlags.DESTROY_WITH_PARENT,
+        )
+        dialog.add_buttons("Cancel", Gtk.ResponseType.CANCEL,
+                           "Create", Gtk.ResponseType.OK)
+        dialog.set_default_response(Gtk.ResponseType.OK)
+
+        content = dialog.get_content_area()
+        content.set_margin_start(12)
+        content.set_margin_end(12)
+        content.set_margin_top(8)
+        content.set_margin_bottom(8)
+
+        entry = Gtk.Entry()
+        entry.set_text("New Tab")
+        entry.set_activates_default(True)
+        content.pack_start(entry, True, True, 8)
+
+        dialog.show_all()
+
+        if dialog.run() == Gtk.ResponseType.OK:
+            name = entry.get_text().strip()
+            if name:
+                self._add_tab(name, [camera_id])
+        dialog.destroy()
+
+    def _popout_camera(self, camera_id):
+        win = PopOutWindow(self, camera_id)
+        self.popout_windows.append(win)
+
+    # ── Helpers ──────────────────────────────────────────────────────────────
+    def _restore_current_grid(self):
+        page = self._current_page()
+        if page and hasattr(page, 'restore_grid'):
+            page.restore_grid()
+
+    def _current_page(self):
+        idx = self.notebook.get_current_page()
+        if idx >= 0:
+            return self.notebook.get_nth_page(idx)
+        return None
+
+    def _on_tab_switch(self, notebook, page, page_num):
         self.back_btn.hide()
-        self.status_lbl.set_text(
-            f"GRID VIEW  ─  {len(self.backends)} PIPELINE(S) ACTIVE"
-        )
+        if hasattr(page, 'max_id') and page.max_id is not None:
+            self.back_btn.show()
+        if hasattr(page, 'name'):
+            n = len(page.camera_ids) if hasattr(page, 'camera_ids') else 0
+            self.status_lbl.set_text(f"TAB: {page.name}  \u2500  {n} FEED(S)")
 
     # ── Tick ─────────────────────────────────────────────────────────────────
     def _tick(self):
@@ -696,11 +1034,15 @@ class ReceiverApp(Gtk.Window):
 
     # ── Key ──────────────────────────────────────────────────────────────────
     def _on_key(self, w, e):
-        if e.keyval == Gdk.KEY_Escape and self.max_id is not None:
-            self._restore_grid()
+        if e.keyval == Gdk.KEY_Escape:
+            page = self._current_page()
+            if page and hasattr(page, 'max_id') and page.max_id is not None:
+                page.restore_grid()
 
     # ── Destroy ──────────────────────────────────────────────────────────────
     def _on_destroy(self, w):
+        for win in list(self.popout_windows):
+            win.destroy()
         for be in self.backends:
             be.stop()
         Gtk.main_quit()
