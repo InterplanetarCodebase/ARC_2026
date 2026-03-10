@@ -97,9 +97,10 @@ class CameraBackend:
     # ── Build pipeline ────────────────────────────────────────────────────────
     def build(self):
         pipeline_str = (
-            f"udpsrc port={self.port} "
+            f"udpsrc port={self.port} buffer-size=2097152 "
             f"caps=\"application/x-rtp,media=video,clock-rate=90000,"
             f"encoding-name=H264,payload=96\" ! "
+            f"rtpjitterbuffer latency=100 drop-on-latency=true ! "
             f"rtph264depay ! h264parse ! "
             f"{self.decoder['pipeline']} ! "
             f"videoscale ! videoconvert ! "

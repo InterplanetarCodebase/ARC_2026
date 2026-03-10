@@ -37,25 +37,25 @@ ENCODER_CANDIDATES = [
     {
         "name":    "v4l2h264enc",
         "element": "v4l2h264enc",
-        "pipeline": 'v4l2h264enc extra-controls="controls,repeat_sequence_header=1" ! video/x-h264,profile=baseline',
+        "pipeline": 'v4l2h264enc extra-controls="controls,repeat_sequence_header=1,h264_i_frame_period={keyint},video_bitrate={bitrate}" ! video/x-h264,profile=baseline',
         "note":    "RPi4 HW (v4l2h264enc)"
     },
     {
         "name":    "nvh264enc",
         "element": "nvh264enc",
-        "pipeline": "nvh264enc preset=low-latency-hq rc-mode=cbr bitrate=2000 ! video/x-h264,profile=baseline",
+        "pipeline": "nvh264enc preset=low-latency-hq rc-mode=cbr bitrate={bitrate_kbps} gop-size={keyint} ! video/x-h264,profile=baseline",
         "note":    "NVIDIA HW (nvh264enc)"
     },
     {
         "name":    "x264enc",
         "element": "x264enc",
-        "pipeline": "x264enc tune=zerolatency speed-preset=ultrafast ! video/x-h264,profile=baseline",
+        "pipeline": "x264enc tune=zerolatency speed-preset=ultrafast bitrate={bitrate_kbps} key-int-max={keyint} ! video/x-h264,profile=baseline",
         "note":    "Software (x264enc)"
     },
     {
         "name":    "openh264enc",
         "element": "openh264enc",
-        "pipeline": "openh264enc ! video/x-h264,profile=baseline",
+        "pipeline": "openh264enc bitrate={bitrate} ! video/x-h264,profile=baseline",
         "note":    "Software (openh264enc)"
     },
 ]
@@ -421,10 +421,15 @@ class CameraStream:
 
     def build(self):
         src   = self._source_segment()
-        enc   = self.encoder['pipeline']
+        keyint = max(self.fps, 15)  # IDR every ~1 second
+        enc   = self.encoder['pipeline'].format(
+            bitrate=self.bitrate,
+            bitrate_kbps=self.bitrate // 1000,
+            keyint=keyint,
+        )
         tail  = (
             f"h264parse ! "
-            f"rtph264pay config-interval=1 pt=96 ! "
+            f"rtph264pay config-interval=-1 pt=96 mtu=1200 ! "
             f"udpsink host={self.host} port={self.port} sync=false"
         )
         pipeline_str = f"{src} ! {enc} ! {tail}"
@@ -747,7 +752,8 @@ Example usage:
     parser.add_argument("-w", "--width",   type=int, default=640)
     parser.add_argument("-H", "--height",  type=int, default=480)
     parser.add_argument("-f", "--fps",     type=int, default=30)
-    parser.add_argument("-b", "--bitrate", type=int, default=2000000)
+    parser.add_argument("-b", "--bitrate", type=int, default=800000,
+                        help="Target bitrate in bits/s (lower for long-range links)")
     parser.add_argument("--stagger", type=float, default=1.5,
                         help="Seconds between pipeline starts")
     parser.add_argument("--skip-probe", action="store_true",
