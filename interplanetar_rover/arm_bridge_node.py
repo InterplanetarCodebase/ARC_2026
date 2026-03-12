@@ -100,6 +100,12 @@ class ArmBridgeNode(Node):
         self._wd_tripped = False
         m1,m2,m3,m4a,m4b,servo,speed = msg.data[:7]
         speed = max(0, min(255, speed))
+        
+        
+        self.get_logger().info(
+        f'Received /arm_cmd → m1:{m1}, m2:{m2}, m3:{m3}, m4a:{m4a}, m4b:{m4b}, servo:{servo}, speed:{speed}'
+    	)
+    	
         self._send(m1,  speed)
         self._send(m2,  speed)
         self._send(m3,  speed)

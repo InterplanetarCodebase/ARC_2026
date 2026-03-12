@@ -6,7 +6,7 @@ from launch_ros.actions import Node
 def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument('wheel_port', default_value='/dev/ttyUSB0'),
-        DeclareLaunchArgument('arm_port',   default_value='/dev/ttyUSB1'),
+        DeclareLaunchArgument('arm_port',   default_value='/dev/ttyACM0'),
         Node(package='interplanetar_rover', executable='wheel_bridge_node',
              output='screen', emulate_tty=True,
              parameters=[{'serial_port': LaunchConfiguration('wheel_port'),

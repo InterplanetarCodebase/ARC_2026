@@ -68,6 +68,11 @@ class WheelBridgeNode(Node):
     def _cb(self, msg):
         self._last_msg = time.time()
         self._wd_tripped = False
+        
+         # Log the received linear and angular velocities
+        self.get_logger().info(f'Received /cmd_vel → linear.x: {msg.linear.x:.2f}, angular.z: {msg.angular.z:.2f}')
+
+        
         self._send(msg.linear.x, msg.angular.z)
 
     def _watchdog(self):
