@@ -357,6 +357,77 @@ echo $ROS_DOMAIN_ID
 
 ---
 
+## Development Workflow
+
+### Repo and workspace setup
+
+The repo is named `ARC_2026` but the ROS2 package inside it is `interplanetar_rover`. The names don't need to match — colcon reads `package.xml`, not the directory name.
+
+**One-time setup on each machine:**
+```bash
+cd ~/ros2_ws/src
+git clone -b ros2 https://github.com/your-org/ARC_2026.git
+
+# Build once
+cd ~/ros2_ws
+colcon build --packages-select interplanetar_rover --symlink-install
+```
+
+### Branch strategy
+
+```
+main      ← stable websocket implementation (legacy / fallback)
+ros2      ← ROS2 implementation (this branch)
+```
+
+`main` is left untouched as a working fallback. All ROS2 work stays on `ros2`.
+
+### Laptop → Xavier update cycle
+
+**On laptop — edit, commit, push:**
+```bash
+cd ~/ros2_ws/src/ARC_2026
+# edit nodes, test locally
+git add -A
+git commit -m "fix: arm watchdog timeout"
+git push origin ros2
+```
+
+**On Xavier — pull and restart:**
+```bash
+cd ~/ros2_ws/src/ARC_2026
+git pull origin ros2
+# restart the launch — no rebuild needed for .py / .xml / .sh edits
+ros2 launch interplanetar_rover rover.launch.py
+```
+
+**`--symlink-install` means the workspace install points directly back to your source files.** Python edits are live immediately after a pull — no rebuild required unless `setup.py` changes.
+
+### When to rebuild
+
+| Change | Rebuild needed? |
+|---|---|
+| Edit a node `.py` file | ❌ |
+| Edit a launch file | ❌ |
+| Edit a config XML or script | ❌ |
+| Add a new node to `setup.py` entry_points | ✅ |
+| Add a new launch/config file to `setup.py` data_files | ✅ |
+| First build after cloning on a new machine | ✅ |
+
+### .gitignore
+
+Add to repo root to keep build artifacts out of git:
+```gitignore
+__pycache__/
+*.pyc
+*.pyo
+build/
+install/
+log/
+```
+
+---
+
 ## Safety
 
 - Both bridge nodes have a **2-second software watchdog**: no message → wheels stop / arm ESTOPs.
