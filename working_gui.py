@@ -86,8 +86,12 @@ BORDER_LINE = (120,  55,   0)
 RED_ERR     = (255,  50,  20)
 
 BUTTON_LABELS = [
-    "TRIGGER","THUMB","BTN 3","BTN 4","BTN 5","BTN 6",
-    "BTN 7","BTN 8","BTN 9","BTN 10","BTN 11","BTN 12"
+    "TRIGGER", "THUMB",
+    "B3 SRV↓", "B4 ELB↓",
+    "B5 SRV↑", "B6 ELB↑",
+    "B7 ROL↺", "B8 ROL↻",
+    "B9 GRP✕", "B10 GRP○",
+    "BTN 11",  "BTN 12"
 ]
 
 BASE_W, BASE_H = 960, 760   # tall enough for all panels + footer
@@ -582,27 +586,27 @@ def main():
                     packets_sent += 1
                     print_arm_packet(motor_name, state, pkt)
 
-            # Motor 1 — Base (HAT N/S)
-            if hat_y > 0:
+            # Motor 1 — Base  (HAT E=CW, HAT W=CCW)
+            if hat_x > 0:
                 c1 = CMD_MOTOR1_FWD;  motor_states[0] = "FWD"
-            elif hat_y < 0:
+            elif hat_x < 0:
                 c1 = CMD_MOTOR1_REV;  motor_states[0] = "REV"
             else:
                 c1 = CMD_MOTOR1_STOP; motor_states[0] = "STOP"
             maybe_send("m1", c1, "Base", motor_states[0])
 
-            # Motor 2 — Shoulder (HAT W/E)
-            if hat_x > 0:
+            # Motor 2 — Shoulder  (HAT N=Up, HAT S=Down)
+            if hat_y > 0:
                 c2 = CMD_MOTOR2_FWD;  motor_states[1] = "FWD"
-            elif hat_x < 0:
+            elif hat_y < 0:
                 c2 = CMD_MOTOR2_REV;  motor_states[1] = "REV"
             else:
                 c2 = CMD_MOTOR2_STOP; motor_states[1] = "STOP"
             maybe_send("m2", c2, "Shoulder", motor_states[1])
 
-            # Motor 3 — Elbow (B3/B4)
-            if len(buttons) > 3:
-                if buttons[2]:
+            # Motor 3 — Elbow  (BTN6=Up idx5, BTN4=Down idx3)
+            if len(buttons) > 5:
+                if buttons[5]:
                     c3 = CMD_MOTOR3_FWD;  motor_states[2] = "FWD"
                 elif buttons[3]:
                     c3 = CMD_MOTOR3_REV;  motor_states[2] = "REV"
@@ -610,34 +614,34 @@ def main():
                     c3 = CMD_MOTOR3_STOP; motor_states[2] = "STOP"
                 maybe_send("m3", c3, "Elbow", motor_states[2])
 
-            # Motor 4A — Roller (B5/B6)
-            if len(buttons) > 5:
-                if buttons[4]:
+            # Wrist_Servo  (BTN5=Up idx4, BTN3=Down idx2)
+            if len(buttons) > 4:
+                if buttons[4]:  servo_angle += SERVO_STEP
+                if buttons[2]:  servo_angle -= SERVO_STEP
+            servo_angle = max(SERVO_MIN, min(SERVO_MAX, servo_angle))
+            pkt = arm.send(CMD_SERVO_ANGLE, servo_angle)
+            packets_sent += 1
+            maybe_print_servo(servo_angle, pkt)
+
+            # Motor 4A — Roller  (BTN8=CW idx7, BTN7=CCW idx6)
+            if len(buttons) > 7:
+                if buttons[7]:
                     c4 = CMD_MOTOR4A_FWD;  motor_states[3] = "FWD"
-                elif buttons[5]:
+                elif buttons[6]:
                     c4 = CMD_MOTOR4A_REV;  motor_states[3] = "REV"
                 else:
                     c4 = CMD_MOTOR4A_STOP; motor_states[3] = "STOP"
                 maybe_send("m4", c4, "Roller", motor_states[3])
 
-            # Motor 4B — Gripper (B7/B8)
-            if len(buttons) > 7:
-                if buttons[6]:
+            # Motor 4B — Gripper  (BTN10=Open idx9, BTN9=Close idx8)
+            if len(buttons) > 9:
+                if buttons[9]:
                     c5 = CMD_MOTOR4B_FWD;  motor_states[4] = "FWD"
-                elif buttons[7]:
+                elif buttons[8]:
                     c5 = CMD_MOTOR4B_REV;  motor_states[4] = "REV"
                 else:
                     c5 = CMD_MOTOR4B_STOP; motor_states[4] = "STOP"
                 maybe_send("m5", c5, "Gripper", motor_states[4])
-
-            # Wrist_Servo (B9/B10)
-            if len(buttons) > 9:
-                if buttons[8]:  servo_angle += SERVO_STEP
-                if buttons[9]:  servo_angle -= SERVO_STEP
-            servo_angle = max(SERVO_MIN, min(SERVO_MAX, servo_angle))
-            pkt = arm.send(CMD_SERVO_ANGLE, servo_angle)
-            packets_sent += 1
-            maybe_print_servo(servo_angle, pkt)
 
         # ── Send wheel commands ───────────────────────────────────────────
         if connected and (now - last_wheel_send) >= WHEEL_SEND_RATE:
@@ -722,7 +726,7 @@ def main():
 
         # ── Footer ────────────────────────────────────────────────────────
         foot = FONT_XS.render(
-            "ESC: quit   B9/B10: Wrist_Servo ▲▼   B3-B8: Elbow/Roller/Gripper   HAT: Base/Shoulder",
+            "ESC: quit   HAT E/W: Base CW/CCW   HAT N/S: Shoulder Up/Dn   B6/B4: Elbow   B5/B3: Servo   B8/B7: Roller   B10/B9: Gripper",
             True, ORANGE_MID)
         canvas.blit(foot, (BASE_W // 2 - foot.get_width() // 2, BASE_H - 16))
 
