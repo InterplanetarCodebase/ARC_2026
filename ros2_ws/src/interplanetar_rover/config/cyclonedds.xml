@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<CycloneDDS>
+  <Domain>
+    <General>
+      <NetworkInterfaceAddress>auto</NetworkInterfaceAddress>
+      <AllowMulticast>true</AllowMulticast>
+      <MaxMessageSize>65500B</MaxMessageSize>
+    </General>
+    <Internal>
+      <SocketReceiveBufferSize min="1MB" />
+      <SocketSendBufferSize    min="1MB" />
+      <WriterLingerDuration>0</WriterLingerDuration>
+      <HeartbeatInterval>10ms</HeartbeatInterval>
+      <NackSuppressionDuration>0ms</NackSuppressionDuration>
+    </Internal>
+    <Discovery>
+      <!-- Uncomment and set rover IP if multicast is blocked on competition WiFi:
+      <Peers><Peer address="192.168.10.177"/></Peers>
+      -->
+      <ParticipantIndex>auto</ParticipantIndex>
+      <MaxAutoParticipantIndex>50</MaxAutoParticipantIndex>
+    </Discovery>
+    <Tracing>
+      <Verbosity>warning</Verbosity>
+      <OutputFile>stderr</OutputFile>
+    </Tracing>
+  </Domain>
+</CycloneDDS>
