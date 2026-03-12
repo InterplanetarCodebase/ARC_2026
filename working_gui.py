@@ -145,14 +145,18 @@ class WheelSender:
         return crc
 
     def send_drive(self, x, z, throttle_pct):
-        x_i8 = int(max(-127.0, min(127.0, x * 127.0)))
-        z_i8 = int(max(-127.0, min(127.0, z * 127.0)))
-        thr  = int(max(0, min(255, throttle_pct * 255.0)))
+        # Throttle is applied here on the GUI side — x and z arrive at the
+        # Arduino already scaled, so the Arduino needs no throttle multiply.
+        x_scaled = max(-1.0, min(1.0, x * throttle_pct))
+        z_scaled = max(-1.0, min(1.0, z * throttle_pct))
+        x_i8 = int(max(-127.0, min(127.0, x_scaled * 127.0)))
+        z_i8 = int(max(-127.0, min(127.0, z_scaled * 127.0)))
         x_byte = _struct.pack('b', x_i8)[0]
         z_byte = _struct.pack('b', z_i8)[0]
+        # Throttle byte sent as 0xFF (reserved/unused) — packet format unchanged
         body = bytes([WHEEL_SOF1, WHEEL_SOF2,
                       (self.seq >> 8) & 0xFF, self.seq & 0xFF,
-                      x_byte, z_byte, thr])
+                      x_byte, z_byte, 0xFF])
         pkt = body + bytes([self._crc8(body)])
         try:
             self.sock.sendto(pkt, self.addr)

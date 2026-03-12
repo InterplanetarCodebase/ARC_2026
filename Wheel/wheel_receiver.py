@@ -7,6 +7,12 @@ wheel_receiver.py  —  Runs on Jetson Xavier
 - Forwards drive commands to Arduino Nano via USB Serial
 - Relays ACKs back to base station
 - Watchdog: if no UDP from base for >2s, sends zero-drive to Arduino (stop)
+
+Throttle architecture note:
+  Throttle scaling is performed on the GUI (base station) side.
+  x_i8 and z_i8 in the packet already encode the throttle-scaled velocity.
+  Byte[6] (formerly throttle) arrives as 0xFF (reserved) and is ignored here.
+  This node is a transparent relay — it does not interpret drive values.
 """
 
 import socket
@@ -48,19 +54,19 @@ def crc8(data: bytes) -> int:
             crc = ((crc << 1) ^ 0x07) & 0xFF if (crc & 0x80) else (crc << 1) & 0xFF
     return crc
 
-def make_drive_packet(seq: int, x_i8: int, z_i8: int, throttle: int) -> bytes:
+def make_drive_packet(seq: int, x_i8: int, z_i8: int) -> bytes:
     """
-    x_i8, z_i8  : signed int8  (-127..127)
-    throttle     : uint8        (0..255)
+    x_i8, z_i8 : signed int8 (-127..127), already throttle-scaled by GUI.
+    Byte[6] is sent as 0xFF (reserved).
     """
     x_byte = struct.pack('b', max(-127, min(127, x_i8)))[0]
     z_byte = struct.pack('b', max(-127, min(127, z_i8)))[0]
     body = bytes([SOF1, SOF2, (seq >> 8) & 0xFF, seq & 0xFF,
-                  x_byte, z_byte, throttle & 0xFF])
+                  x_byte, z_byte, 0xFF])
     return body + bytes([crc8(body)])
 
 def make_stop_packet(seq: int) -> bytes:
-    return make_drive_packet(seq, 0, 0, 0)
+    return make_drive_packet(seq, 0, 0)
 
 # ─── SHARED STATE ──────────────────────────────────────────────────
 last_udp_time  = time.time()

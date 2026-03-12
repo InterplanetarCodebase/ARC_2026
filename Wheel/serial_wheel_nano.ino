@@ -7,13 +7,13 @@
 //  WHEEL CONTROLLER FIRMWARE — Arduino Nano
 //  4x BTS7960 drivers, differential drive
 //
-//  Packet: [0xAA][0xBB][SEQ_H][SEQ_L][x_i8][z_i8][throttle][CRC8]
-//  ACK:    [0xAC][SEQ_H][SEQ_L][STATUS]
+//  Packet: [0xAA][0xBB][SEQ_H][SEQ_L][x_i8][z_i8][0xFF][CRC8]
+//          x_i8 and z_i8 arrive already throttle-scaled from the GUI.
+//          Byte[6] (formerly throttle) is reserved — ignored here.
 //
 //  Differential drive:
 //    left  motor  ←  x - z
 //    right motor  ←  x + z
-//  Both scaled by throttle.
 // ================================================================
  
 // ── BTS7960 Pin Definitions ──────────────────────────────────────
@@ -34,7 +34,7 @@
 #define SOF1        0xAA
 #define SOF2        0xBB
 #define ACK_BYTE    0xAC
-#define PACKET_LEN  8    // [SOF1][SOF2][SEQ_H][SEQ_L][x_i8][z_i8][throttle][CRC8]
+#define PACKET_LEN  8    // [SOF1][SOF2][SEQ_H][SEQ_L][x_i8][z_i8][reserved][CRC8]
 #define ACK_LEN     4    // [ACK][SEQ_H][SEQ_L][STATUS]
  
 #define STATUS_OK       0x00
@@ -116,11 +116,10 @@ void stopAll() {
  
 // ================================================================
 // Differential drive
-//   x_i8     : -127 (full reverse) to +127 (full forward)
-//   z_i8     : -127 (full left)    to +127 (full right)
-//   throttle : 0 (stopped)         to 255  (full speed)
+//   x_i8 : -127 (full reverse) to +127 (full forward)  — pre-scaled by GUI
+//   z_i8 : -127 (full left)    to +127 (full right)     — pre-scaled by GUI
 // ================================================================
-void driveWheels(int8_t x_i8, int8_t z_i8, uint8_t throttle) {
+void driveWheels(int8_t x_i8, int8_t z_i8) {
 
   int8_t temp;
   temp = x_i8;
@@ -132,15 +131,13 @@ void driveWheels(int8_t x_i8, int8_t z_i8, uint8_t throttle) {
   int leftRaw  = (int)x_i8 - (int)z_i8;
   int rightRaw = (int)x_i8 + (int)z_i8;
  
-  // Clamp to [-127, 127]
+  // Clamp to [-127, 127] then scale to PWM range [-255, 255]
   leftRaw  = constrain(leftRaw,  -127, 127);
   rightRaw = constrain(rightRaw, -127, 127);
- 
-  // Scale by throttle (0-255) → output 0-255 PWM
-  int leftPWM  = (int)leftRaw  * (int)throttle / 127;
-  int rightPWM = (int)rightRaw * (int)throttle / 127;
- 
-  // Clamp to [-255, 255]
+
+  int leftPWM  = leftRaw  * 2;   // 127 → 254 ≈ 255, linear scale to PWM range
+  int rightPWM = rightRaw * 2;
+
   leftPWM  = constrain(leftPWM,  -255, 255);
   rightPWM = constrain(rightPWM, -255, 255);
  
@@ -162,16 +159,16 @@ void processPacket(uint8_t *buf) {
  
   lastPacketMs = millis();
  
-  int8_t  x_i8     = (int8_t)buf[4];
-  int8_t  z_i8     = (int8_t)buf[5];
-  uint8_t throttle  = buf[6];
+  int8_t  x_i8 = (int8_t)buf[4];
+  int8_t  z_i8 = (int8_t)buf[5];
+  // buf[6] reserved (was throttle) — ignored; GUI applies throttle scaling
  
   // x=0, z=0 → stop (also handles heartbeat-style zero commands)
   if (x_i8 == 0 && z_i8 == 0) {
     stopAll();
     watchdogTripped = false;  // not a fault stop — just idle
   } else {
-    driveWheels(x_i8, z_i8, throttle);
+    driveWheels(x_i8, z_i8);
   }
  
   sendAck(seq, STATUS_OK);
