@@ -1,0 +1,20 @@
+.vscode/
+# ROS2 build artifacts — never commit these
+__pycache__/
+*.pyc
+*.pyo
+
+# If ros2_ws is above this repo (standard), these won't exist here anyway.
+# But if someone accidentally builds inside the package:
+build/
+install/
+log/
+```
+
+---
+
+## Recommended branch strategy
+```
+main        ← stable websocket implementation (ARC 2025 / legacy)
+ros2        ← current ROS2 implementation (what you're working on)
+ros2-dev    ← optional: experimental changes before merging to ros2
