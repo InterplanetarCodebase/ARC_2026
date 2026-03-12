@@ -17,13 +17,3 @@ export CYCLONEDDS_URI="file://$PKG_DIR/config/cyclonedds_rover.xml"
 
 echo "[ROVER] ROS2 ready — domain=$ROS_DOMAIN_ID"
 echo "[ROVER] DDS config: $CYCLONEDDS_URI"
-```
-
-The path logic assumes the standard colcon layout:
-```
-<anywhere>/
-└── src/
-    └── interplanetar_rover/   ← PKG_DIR
-        └── scripts/           ← SCRIPT_DIR
-        └── config/
-└── install/                   ← WS_INSTALL (3 levels up from PKG_DIR)

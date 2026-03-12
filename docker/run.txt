@@ -1,0 +1,10 @@
+
+docker run -it \
+--network host \
+--ipc host \
+--privileged \
+-e DISPLAY=$DISPLAY \
+-v /tmp/.X11-unix:/tmp/.X11-unix \
+-v ~/ros2_ws:/workspace \
+-v /dev:/dev \
+interplanetar_ros2
