@@ -11,22 +11,21 @@
 const int SERVO_PIN = 22;
 
 // BTS7960 Motor Drivers
-const int RPWM1 = 25, LPWM1 = 26;  // Motor 1 (base rotation or shoulder)
-const int RPWM2 = 12, LPWM2 = 14;  // Motor 2
-const int RPWM3 = 15, LPWM3 = 4;   // Motor 3
+const int RPWM1 = 25, LPWM1 = 26;  // Motor 1 (Base)
+const int RPWM2 = 12, LPWM2 = 14;  // Motor 2 (Shoulder)
+const int RPWM3 = 15, LPWM3 = 4;   // Motor 3 (Elbow)
 
 // L298N Motor Driver
-const int IN1 = 19, IN2 = 21;      // Motor 4A
-const int IN3 = 5,  IN4 = 18;      // Motor 4B
+const int IN1 = 19, IN2 = 21;      // Motor 4A (Roller)
+const int IN3 = 5,  IN4 = 18;      // Motor 4B (Gripper)
 
 // ---------- PROTOCOL ----------
 #define SOF1       0xAA
 #define SOF2       0xBB
 #define ACK_BYTE   0xAC
-#define PACKET_LEN 7   // [SOF1][SOF2][SEQ_H][SEQ_L][CMD][VAL][CRC8]
-#define ACK_LEN    4   // [ACK][SEQ_H][SEQ_L][STATUS]
+#define PACKET_LEN 7
+#define ACK_LEN    4
 
-// CMD definitions (matches transmitter)
 #define CMD_MOTOR1_FWD   0x11
 #define CMD_MOTOR1_REV   0x12
 #define CMD_MOTOR1_STOP  0x13
@@ -42,19 +41,18 @@ const int IN3 = 5,  IN4 = 18;      // Motor 4B
 #define CMD_MOTOR4B_FWD  0x51
 #define CMD_MOTOR4B_REV  0x52
 #define CMD_MOTOR4B_STOP 0x53
-#define CMD_SERVO_ANGLE  0x60  // VAL = angle 0-180
+#define CMD_SERVO_ANGLE  0x60
 #define CMD_SERVO_SWEEP  0x61
-#define CMD_ESTOP        0xFF  // Emergency stop ALL
-#define CMD_HEARTBEAT    0x00  // Keepalive
+#define CMD_ESTOP        0xFF
+#define CMD_HEARTBEAT    0x00
 
-// STATUS codes in ACK
 #define STATUS_OK        0x00
 #define STATUS_CRC_ERR   0x01
 #define STATUS_UNK_CMD   0x02
 #define STATUS_ESTOP     0x03
 
 // ---------- WATCHDOG ----------
-#define WATCHDOG_TIMEOUT_MS 1000  // 1 second — if no packet, ESTOP
+#define WATCHDOG_TIMEOUT_MS 1000
 unsigned long lastPacketTime = 0;
 bool watchdogTripped = false;
 
@@ -66,7 +64,7 @@ int rxIndex = 0;
 bool inPacket = false;
 
 // ================================================================
-// CRC8 (poly 0x07, Dallas/Maxim compatible)
+// CRC8 (poly 0x07)
 // ================================================================
 uint8_t crc8(const uint8_t *data, uint8_t len) {
   uint8_t crc = 0x00;
@@ -78,9 +76,6 @@ uint8_t crc8(const uint8_t *data, uint8_t len) {
   return crc;
 }
 
-// ================================================================
-// Send ACK back to Jetson
-// ================================================================
 void sendAck(uint16_t seq, uint8_t status) {
   uint8_t ack[ACK_LEN] = {
     ACK_BYTE,
@@ -91,9 +86,6 @@ void sendAck(uint16_t seq, uint8_t status) {
   Serial.write(ack, ACK_LEN);
 }
 
-// ================================================================
-// Emergency Stop - all motors off
-// ================================================================
 void emergencyStop() {
   analogWrite(RPWM1, 0); analogWrite(LPWM1, 0);
   analogWrite(RPWM2, 0); analogWrite(LPWM2, 0);
@@ -103,40 +95,30 @@ void emergencyStop() {
   watchdogTripped = true;
 }
 
-// ================================================================
-// Execute command
-// ================================================================
 uint8_t executeCommand(uint8_t cmd, uint8_t val) {
-  watchdogTripped = false;  // Clear estop on any valid command
+  watchdogTripped = false;
 
   switch (cmd) {
-
-    // --- Motor 1 (BTS7960) ---
     case CMD_MOTOR1_FWD:  analogWrite(RPWM1, val); analogWrite(LPWM1, 0);   break;
     case CMD_MOTOR1_REV:  analogWrite(RPWM1, 0);   analogWrite(LPWM1, val); break;
     case CMD_MOTOR1_STOP: analogWrite(RPWM1, 0);   analogWrite(LPWM1, 0);   break;
 
-    // --- Motor 2 (BTS7960) ---
     case CMD_MOTOR2_FWD:  analogWrite(RPWM2, val); analogWrite(LPWM2, 0);   break;
     case CMD_MOTOR2_REV:  analogWrite(RPWM2, 0);   analogWrite(LPWM2, val); break;
     case CMD_MOTOR2_STOP: analogWrite(RPWM2, 0);   analogWrite(LPWM2, 0);   break;
 
-    // --- Motor 3 (BTS7960) ---
     case CMD_MOTOR3_FWD:  analogWrite(RPWM3, val); analogWrite(LPWM3, 0);   break;
     case CMD_MOTOR3_REV:  analogWrite(RPWM3, 0);   analogWrite(LPWM3, val); break;
     case CMD_MOTOR3_STOP: analogWrite(RPWM3, 0);   analogWrite(LPWM3, 0);   break;
 
-    // --- Motor 4A (L298N) ---
     case CMD_MOTOR4A_FWD:  digitalWrite(IN1, HIGH); digitalWrite(IN2, LOW);  break;
     case CMD_MOTOR4A_REV:  digitalWrite(IN1, LOW);  digitalWrite(IN2, HIGH); break;
     case CMD_MOTOR4A_STOP: digitalWrite(IN1, LOW);  digitalWrite(IN2, LOW);  break;
 
-    // --- Motor 4B (L298N) ---
     case CMD_MOTOR4B_FWD:  digitalWrite(IN3, HIGH); digitalWrite(IN4, LOW);  break;
     case CMD_MOTOR4B_REV:  digitalWrite(IN3, LOW);  digitalWrite(IN4, HIGH); break;
     case CMD_MOTOR4B_STOP: digitalWrite(IN3, LOW);  digitalWrite(IN4, LOW);  break;
 
-    // --- Servo ---
     case CMD_SERVO_ANGLE:
       val = constrain(val, 0, 180);
       myservo.write(val);
@@ -148,11 +130,9 @@ uint8_t executeCommand(uint8_t cmd, uint8_t val) {
       myservo.write(90);
       break;
 
-    // --- Heartbeat (no action, just resets watchdog) ---
     case CMD_HEARTBEAT:
       break;
 
-    // --- Emergency Stop ---
     case CMD_ESTOP:
       emergencyStop();
       return STATUS_ESTOP;
@@ -160,15 +140,10 @@ uint8_t executeCommand(uint8_t cmd, uint8_t val) {
     default:
       return STATUS_UNK_CMD;
   }
-
   return STATUS_OK;
 }
 
-// ================================================================
-// Process a complete received packet
-// ================================================================
 void processPacket(uint8_t *buf) {
-  // Verify CRC (over bytes 0..5, CRC is byte 6)
   uint8_t calcCrc = crc8(buf, PACKET_LEN - 1);
   uint16_t seq = ((uint16_t)buf[2] << 8) | buf[3];
 
@@ -186,11 +161,8 @@ void processPacket(uint8_t *buf) {
   sendAck(seq, status);
 }
 
-// ================================================================
-// SETUP
-// ================================================================
 void setup() {
-  Serial.begin(921600);  // High baud for low-latency USB serial
+  Serial.begin(921600);
 
   pinMode(RPWM1, OUTPUT); pinMode(LPWM1, OUTPUT);
   pinMode(RPWM2, OUTPUT); pinMode(LPWM2, OUTPUT);
@@ -199,48 +171,35 @@ void setup() {
   pinMode(IN3, OUTPUT);   pinMode(IN4, OUTPUT);
 
   myservo.attach(SERVO_PIN);
-  myservo.write(90);  // Center on boot
+  myservo.write(90);
 
-  emergencyStop();  // Safe state on boot
+  emergencyStop();
   watchdogTripped = false;
-
   lastPacketTime = millis();
 }
 
-// ================================================================
-// LOOP
-// ================================================================
 void loop() {
-
-  // --- Watchdog check ---
   if (!watchdogTripped && (millis() - lastPacketTime > WATCHDOG_TIMEOUT_MS)) {
     emergencyStop();
-    // watchdogTripped is now set inside emergencyStop()
   }
 
-  // --- Packet parser (state machine) ---
   while (Serial.available()) {
     uint8_t byte = Serial.read();
 
     if (!inPacket) {
-      // Look for SOF1
       if (rxIndex == 0 && byte == SOF1) {
         rxBuf[rxIndex++] = byte;
-      }
-      // Look for SOF2
-      else if (rxIndex == 1 && byte == SOF2) {
+      } else if (rxIndex == 1 && byte == SOF2) {
         rxBuf[rxIndex++] = byte;
-        inPacket = true;  
-      }
-      else {
-        rxIndex = 0;  // Reset on bad SOF
+        inPacket = true;
+      } else {
+        rxIndex = 0;
       }
     } else {
       rxBuf[rxIndex++] = byte;
-
       if (rxIndex == PACKET_LEN) {
         processPacket(rxBuf);
-        rxIndex = 0;
+        rxIndex  = 0;
         inPacket = false;
       }
     }

@@ -5,7 +5,7 @@
 
 ## Overview
 
-This repository contains the complete control software and firmware for the Team Interplanetar BUET rover. The stack uses **ROS2 Humble** with **CycloneDDS** for the communication backbone, providing low-latency, reliable teleoperation over WiFi with a clean path toward autonomous navigation.
+Complete control software and firmware for the Team Interplanetar BUET rover. Uses **ROS2 Humble** with **CycloneDDS** for low-latency teleoperation over WiFi. Build type is **ament_python** — no C++ compilation required.
 
 ---
 
@@ -22,12 +22,11 @@ This repository contains the complete control software and firmware for the Team
 │  │  Live telemetry display                                  │   │
 │  │                                                          │   │
 │  │  Publishes:                                              │   │
-│  │    /cmd_vel   geometry_msgs/Twist  @ 20 Hz               │   │
-│  │    /arm_cmd   ArmCommand           @ 20 Hz               │   │
+│  │    /cmd_vel   geometry_msgs/Twist       @ 20 Hz          │   │
+│  │    /arm_cmd   std_msgs/Int16MultiArray  @ 20 Hz          │   │
 │  └──────────────────────────────────────────────────────────┘   │
 └───────────────────────────┬─────────────────────────────────────┘
-                            │ CycloneDDS over WiFi
-                            │ (UDP multicast / unicast)
+                            │ CycloneDDS over WiFi (UDP multicast)
 ┌───────────────────────────▼─────────────────────────────────────┐
 │                       JETSON XAVIER (Rover)                     │
 │                                                                 │
@@ -50,24 +49,40 @@ This repository contains the complete control software and firmware for the Team
     └────────────────────┘           └─────────────────────┘
 ```
 
-### Topic Reference
+---
+
+## Topic Reference
 
 | Topic | Type | QoS | Publisher | Subscriber |
 |---|---|---|---|---|
 | `/cmd_vel` | `geometry_msgs/Twist` | Best Effort, depth 1 | `gui_node` | `wheel_bridge_node` |
-| `/arm_cmd` | `ArmCommand` | Reliable, depth 1 | `gui_node` | `arm_bridge_node` |
+| `/arm_cmd` | `std_msgs/Int16MultiArray` | Reliable, depth 1 | `gui_node` | `arm_bridge_node` |
+
+### /arm_cmd Layout
+
+`Int16MultiArray` with 7 fixed slots:
+
+| Index | Field | Values |
+|---|---|---|
+| 0 | motor1_cmd (Base) | 0x11=FWD, 0x12=REV, 0x13=STOP |
+| 1 | motor2_cmd (Shoulder) | 0x21=FWD, 0x22=REV, 0x23=STOP |
+| 2 | motor3_cmd (Elbow) | 0x31=FWD, 0x32=REV, 0x33=STOP |
+| 3 | motor4a_cmd (Roller) | 0x41=FWD, 0x42=REV, 0x43=STOP |
+| 4 | motor4b_cmd (Gripper) | 0x51=FWD, 0x52=REV, 0x53=STOP |
+| 5 | servo_angle | 0–180 degrees |
+| 6 | motor_speed | 0–255 (PWM) |
 
 ### QoS Rationale
 
 - **`/cmd_vel` — Best Effort:** Drive commands are time-critical. A stale retransmitted command arriving late is more dangerous than a dropped one. The watchdog handles dropout.
-- **`/arm_cmd` — Reliable:** Motor state changes are infrequent and must arrive. A missed STOP is unacceptable for arm safety.
+- **`/arm_cmd` — Reliable:** Motor state changes must arrive. A missed STOP is unacceptable for arm safety.
 
 ### Serial Packet Formats
 
 **Wheel (Arduino Nano):**
 ```
 [0xAA][0xBB][SEQ_H][SEQ_L][x_i8][z_i8][0xFF][CRC8]  — 8 bytes
-x_i8, z_i8: throttle-scaled signed int8 from GUI
+x_i8, z_i8: throttle-scaled signed int8, applied on GUI side
 ```
 
 **Arm (ESP32):**
@@ -95,47 +110,40 @@ ACK: [0xAC][SEQ_H][SEQ_L][STATUS]           — 4 bytes
 ## Repository Structure
 
 ```
-.
-├── README.md
-├── firmware/
-│   ├── arm_esp32/
-│   │   └── arm_controller.ino           # ESP32 arm firmware
-│   └── wheel_nano/
-│       └── serial_wheel_nano.ino        # Arduino Nano wheel firmware
+interplanetar_rover/
+├── package.xml
+├── setup.py
+├── setup.cfg
+├── resource/
+│   └── interplanetar_rover
+├── interplanetar_rover/          # Python nodes
+│   ├── __init__.py
+│   ├── gui_node.py               # Base station: pygame teleop GUI
+│   ├── wheel_bridge_node.py      # Xavier: /cmd_vel → Arduino serial
+│   └── arm_bridge_node.py        # Xavier: /arm_cmd → ESP32 serial
+├── launch/
+│   ├── base.launch.py            # Run on base station
+│   └── rover.launch.py           # Run on Jetson Xavier
+├── config/
+│   ├── cyclonedds_base.xml       # DDS config — base station
+│   └── cyclonedds_rover.xml      # DDS config — Jetson Xavier
 ├── scripts/
-│   ├── setup_cyclone_base.sh            # Env setup for base station
-│   └── setup_cyclone_rover.sh           # Env setup for Jetson Xavier
-└── ros2_ws/
-    └── src/
-        └── interplanetar_rover/
-            ├── interplanetar_rover/
-            │   ├── __init__.py
-            │   ├── gui_node.py           # Base station: pygame teleop GUI
-            │   ├── wheel_bridge_node.py  # Xavier: /cmd_vel → Arduino serial
-            │   └── arm_bridge_node.py    # Xavier: /arm_cmd → ESP32 serial
-            ├── msg/
-            │   └── ArmCommand.msg        # Custom ROS2 message
-            ├── launch/
-            │   ├── base.launch.py        # Run on base station
-            │   └── rover.launch.py       # Run on Jetson Xavier
-            ├── config/
-            │   └── cyclonedds.xml        # DDS tuning for low latency
-            ├── resource/
-            │   └── interplanetar_rover
-            ├── CMakeLists.txt
-            ├── package.xml
-            └── setup.py
+│   ├── setup_cyclone_base.sh     # Env setup for base station
+│   └── setup_cyclone_rover.sh    # Env setup for Jetson Xavier
+└── firmware/
+    ├── arm_esp32/
+    │   └── arm_controller.ino    # ESP32 arm firmware
+    └── wheel_nano/
+        └── serial_wheel_nano.ino # Arduino Nano wheel firmware
 ```
 
 ---
 
-## Setup Instructions
+## Prerequisites
 
-### Prerequisites
+Both machines must be on the **same WiFi network** and running **ROS2 Humble** (Ubuntu 22.04).
 
-Both machines must be on the **same WiFi network** and running **ROS2 Humble**.
-
-#### Install ROS2 Humble (Ubuntu 22.04)
+### Install ROS2 Humble
 ```bash
 sudo apt install software-properties-common curl
 sudo curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \
@@ -147,87 +155,159 @@ sudo apt update
 sudo apt install ros-humble-desktop python3-colcon-common-extensions
 ```
 
-#### Install CycloneDDS
+### Install CycloneDDS
 ```bash
 sudo apt install ros-humble-rmw-cyclonedds-cpp
 ```
 
-#### Install Python dependencies
+### Install Python dependencies
 ```bash
 pip3 install pyserial pygame
 ```
 
 ---
 
-### Building the Package
+## CycloneDDS Setup
 
-Run on **both** the base station and the Jetson Xavier:
+Each machine has its own config file with its own IP address. Edit the IP before first use.
 
-```bash
-cd ros2_ws
-source /opt/ros/humble/setup.bash
-colcon build --symlink-install
-source install/setup.bash
+**`config/cyclonedds_base.xml`** — set to base station IP:
+```xml
+<?xml version="1.0" encoding="UTF-8" ?>
+<CycloneDDS>
+  <Domain>
+    <General>
+      <NetworkInterfaceAddress>192.168.1.100</NetworkInterfaceAddress>
+      <AllowMulticast>true</AllowMulticast>
+      <MaxMessageSize>65500B</MaxMessageSize>
+    </General>
+    <Internal>
+      <LateAckMode>false</LateAckMode>
+      <ResponsivenessTimeout>50ms</ResponsivenessTimeout>
+    </Internal>
+    <Tracing>
+      <Verbosity>warning</Verbosity>
+    </Tracing>
+  </Domain>
+</CycloneDDS>
 ```
 
-> `--symlink-install` means you can edit Python files without rebuilding.
+**`config/cyclonedds_rover.xml`** — set to Xavier IP:
+```xml
+<?xml version="1.0" encoding="UTF-8" ?>
+<CycloneDDS>
+  <Domain>
+    <General>
+      <NetworkInterfaceAddress>192.168.1.20</NetworkInterfaceAddress>
+      <AllowMulticast>true</AllowMulticast>
+      <MaxMessageSize>65500B</MaxMessageSize>
+    </General>
+    <Internal>
+      <LateAckMode>false</LateAckMode>
+      <ResponsivenessTimeout>50ms</ResponsivenessTimeout>
+    </Internal>
+    <Tracing>
+      <Verbosity>warning</Verbosity>
+    </Tracing>
+  </Domain>
+</CycloneDDS>
+```
+
+The setup scripts point each machine at the correct config file automatically. The only difference between the two XMLs is `NetworkInterfaceAddress`.
 
 ---
 
-### Environment Setup
+## Environment Setup
 
-#### Base Station
+The setup scripts source ROS2, set the DDS implementation, domain ID, and config path. They use `BASH_SOURCE` so they work from any directory.
+
+### Base Station
 ```bash
-source scripts/setup_cyclone_base.sh
+source /path/to/interplanetar_rover/scripts/setup_cyclone_base.sh
 ```
 
-#### Jetson Xavier
+### Jetson Xavier
 ```bash
-source scripts/setup_cyclone_rover.sh
+source /path/to/interplanetar_rover/scripts/setup_cyclone_rover.sh
 ```
 
-> Add these to `~/.bashrc` on both machines for convenience.
+### Add to ~/.bashrc (recommended)
+Run once on each machine so the environment is always ready:
+```bash
+# On base station
+echo "source /path/to/interplanetar_rover/scripts/setup_cyclone_base.sh" >> ~/.bashrc
+
+# On Xavier
+echo "source /path/to/interplanetar_rover/scripts/setup_cyclone_rover.sh" >> ~/.bashrc
+```
+
+Expected output after sourcing:
+```
+[BASE] ROS2 ready — domain=42
+[BASE] DDS config: file:///path/to/interplanetar_rover/config/cyclonedds_base.xml
+```
 
 ---
 
-### Running the System
+## Building the Package
 
-#### 1. Find your serial ports (on Xavier)
+Run on **both** machines after sourcing the setup script:
+
+```bash
+cd /path/to/ros2_ws
+colcon build --packages-select interplanetar_rover --symlink-install
+```
+
+`--symlink-install` means Python node edits take effect immediately without rebuilding.
+
+Then re-source:
+```bash
+source scripts/setup_cyclone_base.sh   # or rover
+```
+
+---
+
+## Running the System
+
+### 1. Find serial ports (Xavier only)
 ```bash
 ls /dev/ttyUSB*
-dmesg | tail -20   # after plugging each USB to identify which is which
+dmesg | tail -20   # plug each USB one at a time to confirm which is which
 ```
 
-#### 2. Grant serial port permissions
+### 2. Grant serial permissions (Xavier only, once)
 ```bash
 sudo usermod -aG dialout $USER
-# Log out and back in, or run:
+# Log out and back in, or run immediately:
 sudo chmod 666 /dev/ttyUSB0 /dev/ttyUSB1
 ```
 
-#### 3. Start rover side (on Jetson Xavier)
+### 3. Start rover side (Jetson Xavier)
 ```bash
 ros2 launch interplanetar_rover rover.launch.py \
-  wheel_serial_port:=/dev/ttyUSB0 \
-  arm_serial_port:=/dev/ttyUSB1
+  wheel_port:=/dev/ttyUSB0 \
+  arm_port:=/dev/ttyUSB1
 ```
 
-#### 4. Start base station (on base station PC)
+Default ports if not specified: `wheel_port=/dev/ttyUSB0`, `arm_port=/dev/ttyUSB1`.
+
+### 4. Start base station
 ```bash
 ros2 launch interplanetar_rover base.launch.py
 ```
 
 ---
 
-### Flashing Firmware
+## Flashing Firmware
 
-#### Arduino Nano (Wheel Controller)
+### Arduino Nano (Wheel Controller)
 - Open `firmware/wheel_nano/serial_wheel_nano.ino` in Arduino IDE
 - Board: **Arduino Nano**
-- Processor: **ATmega328P (Old Bootloader)** if needed
+- Processor: **ATmega328P (Old Bootloader)** if upload fails
+- Baud: **115200**
 - Upload
 
-#### ESP32 (Arm Controller)
+### ESP32 (Arm Controller)
 - Open `firmware/arm_esp32/arm_controller.ino` in Arduino IDE
 - Install **ESP32Servo** library via Library Manager
 - Board: **ESP32 Dev Module**
@@ -236,10 +316,10 @@ ros2 launch interplanetar_rover base.launch.py
 
 ---
 
-### Debugging
+## Debugging
 
 ```bash
-# Check topics are live
+# Verify topics are live
 ros2 topic list
 ros2 topic echo /cmd_vel
 ros2 topic echo /arm_cmd
@@ -248,32 +328,41 @@ ros2 topic echo /arm_cmd
 ros2 topic hz /cmd_vel    # expect ~20 Hz
 ros2 topic hz /arm_cmd    # expect ~20 Hz
 
-# Check nodes are discovered across WiFi
+# Check both machines see each other's nodes
 ros2 node list
 
-# Record a session
+# Record and replay a session
 ros2 bag record /cmd_vel /arm_cmd
 ros2 bag play <bag_directory>
+
+# Verify CycloneDDS config is loaded
+ros2 doctor --report | grep -i cyclone
+echo $CYCLONEDDS_URI
+echo $ROS_DOMAIN_ID
 ```
 
-#### If nodes can't discover each other across WiFi
-Add a static peer in `config/cyclonedds.xml`:
+### Nodes can't discover each other
+1. Confirm `ROS_DOMAIN_ID=42` on both machines: `echo $ROS_DOMAIN_ID`
+2. Confirm `CYCLONEDDS_URI` points to the correct file and the file exists
+3. Confirm both machines can reach each other: `ping <other_machine_ip>`
+4. If the radio blocks multicast, add static peers to both XML configs:
 ```xml
 <Discovery>
   <Peers>
-    <Peer address="192.168.10.177"/>  <!-- rover IP -->
+    <Peer address="192.168.1.100"/>  <!-- base station -->
+    <Peer address="192.168.1.20"/>   <!-- Xavier       -->
   </Peers>
 </Discovery>
 ```
-And ensure `ROS_DOMAIN_ID` matches on both machines (set to 42 in the setup scripts).
 
 ---
 
 ## Safety
 
 - Both bridge nodes have a **2-second software watchdog**: no message → wheels stop / arm ESTOPs.
+- `arm_bridge_node` sends `CMD_HEARTBEAT` to ESP32 every 200 ms while link is alive.
 - ESP32 has an independent **1-second hardware watchdog**.
-- Arduino has an independent **1.5-second hardware watchdog**.
+- Arduino Nano has an independent **1.5-second hardware watchdog**.
 - On node shutdown, both bridges send stop/ESTOP before closing serial.
 
 ---

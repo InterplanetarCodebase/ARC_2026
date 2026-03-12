@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<CycloneDDS>
+  <Domain>
+    <General>
+      <NetworkInterfaceAddress>192.168.1.2</NetworkInterfaceAddress>
+      <AllowMulticast>true</AllowMulticast>
+      <MaxMessageSize>65500B</MaxMessageSize>
+    </General>
+    <Internal>
+      <LateAckMode>false</LateAckMode>
+      <ResponsivenessTimeout>50ms</ResponsivenessTimeout>
+    </Internal>
+    <Tracing>
+      <Verbosity>warning</Verbosity>
+    </Tracing>
+  </Domain>
+</CycloneDDS>

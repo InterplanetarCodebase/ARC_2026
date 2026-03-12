@@ -1,12 +1,29 @@
-#!/bin/bash
-# setup_cyclone_rover.sh — Source this on Jetson Xavier before running
-# Usage: source scripts/setup_cyclone_rover.sh
+#!/usr/bin/env bash
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(dirname "$SCRIPT_DIR")"
+PKG_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
 source /opt/ros/humble/setup.bash
-source "$REPO_ROOT/ros2_ws/install/setup.bash"
+
+WS_INSTALL="$(cd "$PKG_DIR/../.." && pwd)/install/setup.bash"
+if [[ -f "$WS_INSTALL" ]]; then
+    source "$WS_INSTALL"
+else
+    echo "[WARN] Workspace not yet built — run 'colcon build' first"
+fi
+
 export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
-export CYCLONEDDS_URI="file://$REPO_ROOT/ros2_ws/src/interplanetar_rover/config/cyclonedds.xml"
 export ROS_DOMAIN_ID=42
-echo "[ROVER] ROS2 Humble + CycloneDDS ready  |  DOMAIN_ID=$ROS_DOMAIN_ID"
-echo "Serial ports: $(ls /dev/ttyUSB* 2>/dev/null || echo 'none found')"
+export CYCLONEDDS_URI="file://$PKG_DIR/config/cyclonedds_rover.xml"
+
+echo "[ROVER] ROS2 ready — domain=$ROS_DOMAIN_ID"
+echo "[ROVER] DDS config: $CYCLONEDDS_URI"
+```
+
+The path logic assumes the standard colcon layout:
+```
+<anywhere>/
+└── src/
+    └── interplanetar_rover/   ← PKG_DIR
+        └── scripts/           ← SCRIPT_DIR
+        └── config/
+└── install/                   ← WS_INSTALL (3 levels up from PKG_DIR)
