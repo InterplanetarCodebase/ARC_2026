@@ -6,10 +6,10 @@
       <AllowMulticast>true</AllowMulticast>
       <MaxMessageSize>65500B</MaxMessageSize>
     </General>
-    <Internal>
+    <!-- <Internal>
       <LateAckMode>false</LateAckMode>
       <ResponsivenessTimeout>50ms</ResponsivenessTimeout>
-    </Internal>
+    </Internal> -->
     <Tracing>
       <Verbosity>warning</Verbosity>
     </Tracing>
