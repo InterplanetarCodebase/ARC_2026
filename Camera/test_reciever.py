@@ -22,6 +22,8 @@ import subprocess
 import math
 import datetime
 import cairo
+import json
+import socket
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -788,16 +790,29 @@ menuitem:hover  { background: #1a1200; }
 class ReceiverApp(Gtk.Window):
     COLS = 4
 
-    def __init__(self, ports, width, height, host):
+    def __init__(self, ports, width, height, host, control_port=7000):
         super().__init__(title="INTERPLANETAR  ◈  Multi-Camera Receiver")
         self.ports    = ports
         self.width    = width
         self.height   = height
         self.host     = host
+        self.control_port = control_port
 
         self.backends       = []
         self.tab_pages      = []
         self.popout_windows = []
+        self.camera_settings = {
+            idx: {
+                "enabled": True,
+                "bitrate": 1000000,
+                "width": self.width,
+                "height": self.height,
+                "fps": 25,
+                "device": f"/dev/video{idx}",
+                "port": self.ports[idx] if idx < len(self.ports) else (5000 + idx),
+            }
+            for idx in range(len(self.ports))
+        }
 
         Gst.init(None)
         self._apply_css()
@@ -848,6 +863,13 @@ class ReceiverApp(Gtk.Window):
         self.active_badge.set_margin_end(12)
         hdr.pack_start(self.active_badge, False, False, 0)
 
+        self.settings_btn = Gtk.MenuButton(label="Settings")
+        self.settings_btn.set_valign(Gtk.Align.CENTER)
+        self.settings_btn.set_margin_end(8)
+        self.settings_btn.set_relief(Gtk.ReliefStyle.NONE)
+        self.settings_btn.set_popover(self._build_settings_popover())
+        hdr.pack_start(self.settings_btn, False, False, 0)
+
         self.back_btn = Gtk.Button(label="⬡  GRID VIEW")
         self.back_btn.set_name("back-btn")
         self.back_btn.set_valign(Gtk.Align.CENTER)
@@ -884,6 +906,127 @@ class ReceiverApp(Gtk.Window):
         sb.pack_start(self.status_lbl, True,  True,  0)
         sb.pack_end  (self.clock_lbl,  False, False, 0)
         root.pack_end(sb, False, False, 0)
+
+    def _build_settings_popover(self):
+        pop = Gtk.Popover()
+        pop.set_border_width(10)
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+
+        row_cam = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        row_cam.pack_start(Gtk.Label(label="Camera"), False, False, 0)
+        self.settings_camera_combo = Gtk.ComboBoxText()
+        for idx in range(len(self.ports)):
+            self.settings_camera_combo.append_text(f"CAM {idx:02d}")
+        self.settings_camera_combo.set_active(0)
+        self.settings_camera_combo.connect("changed", self._on_settings_camera_changed)
+        row_cam.pack_start(self.settings_camera_combo, True, True, 0)
+        box.pack_start(row_cam, False, False, 0)
+
+        row_enabled = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        row_enabled.pack_start(Gtk.Label(label="Enabled"), False, False, 0)
+        self.settings_enabled = Gtk.Switch()
+        self.settings_enabled.set_active(True)
+        row_enabled.pack_end(self.settings_enabled, False, False, 0)
+        box.pack_start(row_enabled, False, False, 0)
+
+        self.settings_bitrate = Gtk.Entry()
+        self.settings_width = Gtk.Entry()
+        self.settings_height = Gtk.Entry()
+        self.settings_fps = Gtk.Entry()
+        self.settings_device = Gtk.Entry()
+        self.settings_port = Gtk.Entry()
+
+        for label, entry in [
+            ("Device", self.settings_device),
+            ("Port", self.settings_port),
+            ("Bitrate", self.settings_bitrate),
+            ("Width", self.settings_width),
+            ("Height", self.settings_height),
+            ("FPS", self.settings_fps),
+        ]:
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+            row.pack_start(Gtk.Label(label=label), False, False, 0)
+            row.pack_start(entry, True, True, 0)
+            box.pack_start(row, False, False, 0)
+
+        apply_btn = Gtk.Button(label="Apply")
+        apply_btn.connect("clicked", self._apply_camera_settings)
+        box.pack_start(apply_btn, False, False, 0)
+
+        pop.add(box)
+        box.show_all()
+        self._load_settings_to_form(0)
+        return pop
+
+    def _on_settings_camera_changed(self, combo):
+        cam_id = combo.get_active()
+        if cam_id >= 0:
+            self._load_settings_to_form(cam_id)
+
+    def _load_settings_to_form(self, camera_id):
+        cfg = self.camera_settings.get(camera_id)
+        if not cfg:
+            return
+        self.settings_enabled.set_active(bool(cfg.get("enabled", True)))
+        self.settings_device.set_text(str(cfg.get("device", f"/dev/video{camera_id}")))
+        self.settings_port.set_text(str(cfg.get("port", self.ports[camera_id] if camera_id < len(self.ports) else 5000 + camera_id)))
+        self.settings_bitrate.set_text(str(cfg.get("bitrate", 1000000)))
+        self.settings_width.set_text(str(cfg.get("width", self.width)))
+        self.settings_height.set_text(str(cfg.get("height", self.height)))
+        self.settings_fps.set_text(str(cfg.get("fps", 25)))
+
+    def _apply_local_receiver_camera(self, camera_id, enabled, port):
+        """Reconfigure local receive pipeline to follow transmitter-side changes."""
+        if camera_id < 0 or camera_id >= len(self.backends):
+            return
+
+        be = self.backends[camera_id]
+        be.stop()
+        be.port = port
+        if enabled:
+            if be.build() and be.start():
+                if camera_id < len(self.ports):
+                    self.ports[camera_id] = port
+            else:
+                be.status = "error"
+
+    def _apply_camera_settings(self, _btn):
+        cam_id = self.settings_camera_combo.get_active()
+        if cam_id < 0:
+            return
+
+        def _safe_int(entry, default):
+            try:
+                return int(entry.get_text().strip())
+            except Exception:
+                return default
+
+        cfg = {
+            "enabled": self.settings_enabled.get_active(),
+            "device": self.settings_device.get_text().strip() or f"/dev/video{cam_id}",
+            "port": _safe_int(self.settings_port, self.ports[cam_id] if cam_id < len(self.ports) else 5000 + cam_id),
+            "bitrate": _safe_int(self.settings_bitrate, 1000000),
+            "width": _safe_int(self.settings_width, self.width),
+            "height": _safe_int(self.settings_height, self.height),
+            "fps": _safe_int(self.settings_fps, 25),
+        }
+        self.camera_settings[cam_id] = cfg
+
+        payload = {
+            "command": "set_camera",
+            "camera_id": cam_id,
+            **cfg,
+        }
+
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.sendto(json.dumps(payload).encode("utf-8"), (self.host, self.control_port))
+            sock.close()
+            self._apply_local_receiver_camera(cam_id, cfg["enabled"], cfg["port"])
+            self.status_lbl.set_text(f"SETTINGS SENT  ─  CAM {cam_id:02d}")
+        except Exception as e:
+            self.status_lbl.set_text(f"SETTINGS SEND FAILED  ─  CAM {cam_id:02d}  ─  {e}")
 
     def _build_camera_widget(self, camera_id, is_large=False):
         """Create a camera tile with a small snapshot button overlay."""
@@ -1183,7 +1326,28 @@ def signal_handler(sig, frame):
     sys.exit(0)
 
 
+def print_receiver_startup_config(args, default_camera_count, default_base_port):
+    """Print launch/default configuration for easier debugging at startup."""
+    print("\n" + "=" * 70)
+    print("RECEIVER STARTUP CONFIG")
+    print("=" * 70)
+    print(f"Effective host         : {args.host}")
+    print(f"Effective control port : {args.control_port}")
+    print(f"Effective resolution   : {args.width}x{args.height}")
+    print(f"Effective ports ({len(args.ports)}): {args.ports}")
+    print("-" * 70)
+    print(f"Default camera count   : {default_camera_count}")
+    print(f"Default base port      : {default_base_port}")
+    print(f"Default ports          : {[default_base_port + i for i in range(default_camera_count)]}")
+    print("Default settings/cam   : bitrate=1000000, fps=25")
+    print("=" * 70 + "\n")
+
+
 def main():
+    default_camera_count = 8
+    default_base_port = 5000
+    default_ports = [default_base_port + idx for idx in range(default_camera_count)]
+
     parser = argparse.ArgumentParser(
         description="SENTINEL — Multi-Camera GUI Receiver (Jetson)",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -1199,16 +1363,20 @@ Example usage:
     python3 camera_receiver.py -p 5000 5001 -i 192.168.1.50 -w 1280 -H 720
         """
     )
-    parser.add_argument("-p", "--ports", nargs="+", type=int, default=[5000],
+    parser.add_argument("-p", "--ports", nargs="+", type=int, default=default_ports,
                         metavar="PORT",
                         help="UDP port(s). E.g: -p 5000 5001 5002 5003")
-    parser.add_argument("-w", "--width",  type=int, default=640,
+    parser.add_argument("-w", "--width",  type=int, default=1920,
                         help="Decode width per feed")
-    parser.add_argument("-H", "--height", type=int, default=480,
+    parser.add_argument("-H", "--height", type=int, default=1080,
                         help="Decode height per feed")
     parser.add_argument("-i", "--host",   type=str, default="127.0.0.1",
                         help="Transmitter IP (used for ping measurement)")
+    parser.add_argument("--control-port", type=int, default=7000,
+                        help="UDP control port used by transmitter settings channel")
     args = parser.parse_args()
+
+    print_receiver_startup_config(args, default_camera_count, default_base_port)
 
     signal.signal(signal.SIGINT, signal_handler)
 
@@ -1217,6 +1385,7 @@ Example usage:
         width=args.width,
         height=args.height,
         host=args.host,
+        control_port=args.control_port,
     )
     Gtk.main()
 

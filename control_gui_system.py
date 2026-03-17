@@ -16,7 +16,7 @@ os.environ["SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS"] = "1"
 import pygame
 
 # ── Network ─────────────────────────────────────────────────────────────────
-ROVER_IP   = "192.168.10.177"
+ROVER_IP   = "192.168.1.2"
 ROVER_PORT = 5760
 WHEEL_PORT = 5761
 
