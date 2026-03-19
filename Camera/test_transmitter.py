@@ -77,6 +77,8 @@ IO_MODE_CANDIDATES = [
     (2, "userptr"),
 ]
 
+LATENCY_PORT_OFFSET = 1000
+
 
 def detect_encoder():
     for c in ENCODER_CANDIDATES:
@@ -339,6 +341,7 @@ class CameraStream:
         self.device        = device
         self.host          = host
         self.port          = port
+        self.latency_port  = port + LATENCY_PORT_OFFSET
         self.encoder       = encoder
         self.bitrate       = bitrate
         self.io_mode       = io_mode
@@ -363,6 +366,7 @@ class CameraStream:
         self._lock              = threading.Lock()
         self.enabled            = True
         self._pending_control_apply = False
+        self._latency_sock      = None
 
     def _build_profiles(self, w, h, fps):
         """
@@ -410,7 +414,8 @@ class CameraStream:
                 f"image/jpeg,width={self.width},height={self.height},"
                 f"framerate={self.fps}/1 ! "
                 f"jpegdec ! "
-                f"videoconvert"
+                f"videoconvert ! "
+                f"identity name=latency_tap signal-handoffs=true"
             )
         else:
             # Raw format (YUYV, YUY2, NV12, etc.)
@@ -420,7 +425,8 @@ class CameraStream:
                 f"video/x-raw,format={fmt},"
                 f"width={self.width},height={self.height},"
                 f"framerate={self.fps}/1 ! "
-                f"videoconvert"
+                f"videoconvert ! "
+                f"identity name=latency_tap signal-handoffs=true"
             )
 
     def build(self):
@@ -450,6 +456,10 @@ class CameraStream:
         bus = self.pipeline.get_bus()
         bus.add_signal_watch()
         bus.connect("message", self._on_message)
+
+        latency_tap = self.pipeline.get_by_name("latency_tap")
+        if latency_tap:
+            latency_tap.connect("handoff", self._on_latency_handoff)
         return True
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -477,6 +487,12 @@ class CameraStream:
         with self._lock:
             self._do_stop()
             self.status = "stopped"
+        if self._latency_sock:
+            try:
+                self._latency_sock.close()
+            except Exception:
+                pass
+            self._latency_sock = None
         print(f"[cam{self.camera_id}] Stopped")
 
     def _do_stop(self):
@@ -487,6 +503,30 @@ class CameraStream:
 
     def is_device_present(self):
         return os.path.exists(self.device)
+
+    def _emit_latency_telemetry(self, pts):
+        if pts is None or pts == Gst.CLOCK_TIME_NONE:
+            return
+        if self._latency_sock is None:
+            try:
+                self._latency_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            except Exception:
+                return
+        payload = {
+            "camera_id": self.camera_id,
+            "pts": int(pts),
+            "sender_ts_ns": time.time_ns(),
+        }
+        try:
+            self._latency_sock.sendto(
+                json.dumps(payload, separators=(",", ":")).encode("utf-8"),
+                (self.host, self.latency_port),
+            )
+        except Exception:
+            pass
+
+    def _on_latency_handoff(self, _identity, buffer, *_args):
+        self._emit_latency_telemetry(buffer.pts)
 
     # ── Bus messages ──────────────────────────────────────────────────────────
 
@@ -786,6 +826,7 @@ class MultiCameraTransmitter:
             s.enabled = enabled
             s.device = device
             s.port = port
+            s.latency_port = port + LATENCY_PORT_OFFSET
             s.native_format = native_fmt
             s.io_mode = io_mode
             s.bitrate = bitrate
@@ -934,6 +975,8 @@ def print_transmitter_startup_config(args):
     print("-" * 70)
     print("Default startup profile: base-port=5000, width=640, height=480, fps=25, bitrate=1000000")
     print("Control channel default: port=7000")
+    print(f"Latency UDP offset     : +{LATENCY_PORT_OFFSET} (per cam telemetry)")
+    print("Latency note           : accurate one-way latency needs clock sync (NTP/PTP)")
     print("=" * 70 + "\n")
 
 

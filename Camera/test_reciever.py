@@ -2,7 +2,7 @@
 """
 SENTINEL — GStreamer Multi-Camera GUI Receiver
 Jetson-optimized. Auto-detects decoder.
-Chrome-like tabbed interface with per-feed FPS / ping / port overlay.
+Chrome-like tabbed interface with per-feed FPS / latency / port overlay.
 Click any tile to maximize; ESC or button to return to grid.
 Right-click any feed to add to tabs or pop out into separate windows.
 """
@@ -24,6 +24,9 @@ import datetime
 import cairo
 import json
 import socket
+
+
+LATENCY_PORT_OFFSET = 1000
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -52,24 +55,6 @@ def detect_decoder():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Ping helper
-# ══════════════════════════════════════════════════════════════════════════════
-
-def ping_once(host, timeout=1):
-    try:
-        result = subprocess.run(
-            ["ping", "-c", "1", "-W", str(timeout), host],
-            capture_output=True, text=True, timeout=timeout + 1
-        )
-        for line in result.stdout.splitlines():
-            if "time=" in line:
-                return float(line.split("time=")[1].split()[0])
-    except Exception:
-        pass
-    return None
-
-
-# ══════════════════════════════════════════════════════════════════════════════
 #  Camera backend  (GStreamer → appsink → cairo surface)
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -77,6 +62,7 @@ class CameraBackend:
     def __init__(self, camera_id, port, width, height, decoder, host="127.0.0.1"):
         self.camera_id   = camera_id
         self.port        = port
+        self.latency_port = port + LATENCY_PORT_OFFSET
         self.width       = width
         self.height      = height
         self.decoder     = decoder
@@ -85,13 +71,17 @@ class CameraBackend:
         self.pipeline    = None
         self.running     = False
         self.fps         = 0.0
-        self.ping_ms     = None
+        self.latency_ms  = None
         self.status      = "waiting"   # waiting | streaming | error | stopped
 
         self._frame_count = 0
         self._fps_ts      = time.monotonic()
         self._last_frame  = None
+        self._last_frame_sender_ts_ns = None
         self._frame_lock  = threading.Lock()
+        self._latency_lock = threading.Lock()
+        self._latency_pts_map = {}
+        self._latency_sock = None
 
         self._frame_listeners = []
         self._stats_listeners = []
@@ -132,13 +122,19 @@ class CameraBackend:
             self.status = "error"
             return False
         self.running = True
-        threading.Thread(target=self._ping_loop, daemon=True).start()
+        threading.Thread(target=self._latency_loop, daemon=True).start()
         return True
 
     def stop(self):
+        self.running = False
+        if self._latency_sock:
+            try:
+                self._latency_sock.close()
+            except Exception:
+                pass
+            self._latency_sock = None
         if self.pipeline:
             self.pipeline.set_state(Gst.State.NULL)
-        self.running = False
         self.status  = "stopped"
 
     # ── Frame handling ────────────────────────────────────────────────────────
@@ -157,6 +153,7 @@ class CameraBackend:
         if not success:
             return Gst.FlowReturn.OK
 
+        pts = int(buf.pts) if buf.pts != Gst.CLOCK_TIME_NONE else None
         data_copy = bytes(mapinfo.data)
         buf.unmap(mapinfo)
 
@@ -167,6 +164,12 @@ class CameraBackend:
 
         with self._frame_lock:
             self._last_frame = surface
+            if pts is not None:
+                sender_ts_ns = None
+                with self._latency_lock:
+                    sender_ts_ns = self._latency_pts_map.pop(pts, None)
+                if sender_ts_ns is not None:
+                    self._last_frame_sender_ts_ns = sender_ts_ns
 
         # FPS
         self._frame_count += 1
@@ -189,13 +192,51 @@ class CameraBackend:
         with self._frame_lock:
             return self._last_frame
 
-    # ── Ping ─────────────────────────────────────────────────────────────────
-    def _ping_loop(self):
+    def mark_frame_rendered(self):
+        sender_ts_ns = None
+        with self._frame_lock:
+            sender_ts_ns = self._last_frame_sender_ts_ns
+            self._last_frame_sender_ts_ns = None
+        if sender_ts_ns is None:
+            return
+        self.latency_ms = max(0.0, (time.time_ns() - sender_ts_ns) / 1_000_000.0)
+        for _cb in list(self._stats_listeners):
+            GLib.idle_add(_cb, self.camera_id)
+
+    # ── Latency telemetry ────────────────────────────────────────────────────
+    def _latency_loop(self):
+        if self._latency_sock is None:
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                sock.bind(("0.0.0.0", self.latency_port))
+                sock.settimeout(1.0)
+                self._latency_sock = sock
+            except Exception as e:
+                print(f"[cam{self.camera_id}] Latency socket bind failed on :{self.latency_port}: {e}")
+                return
+
         while self.running:
-            self.ping_ms = ping_once(self.host, timeout=2)
-            for _cb in list(self._stats_listeners):
-                GLib.idle_add(_cb, self.camera_id)
-            time.sleep(3)
+            try:
+                data, _addr = self._latency_sock.recvfrom(4096)
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            except Exception:
+                continue
+
+            try:
+                payload = json.loads(data.decode("utf-8"))
+                pts = int(payload.get("pts"))
+                sender_ts_ns = int(payload.get("sender_ts_ns"))
+            except Exception:
+                continue
+
+            with self._latency_lock:
+                self._latency_pts_map[pts] = sender_ts_ns
+                while len(self._latency_pts_map) > 512:
+                    self._latency_pts_map.pop(next(iter(self._latency_pts_map)))
 
     # ── Bus ──────────────────────────────────────────────────────────────────
     def _on_bus_message(self, bus, message):
@@ -307,6 +348,7 @@ class CameraTile(Gtk.DrawingArea):
         cr.set_source_surface(frame, 0, 0)
         cr.paint()
         cr.restore()
+        self.backend.mark_frame_rendered()
 
     def _placeholder(self, cr, W, H):
         # Dark grid bg
@@ -446,12 +488,12 @@ class CameraTile(Gtk.DrawingArea):
         cr.move_to(W / 2 - ext.width / 2, ty)
         cr.show_text(fps_str)
 
-        # Ping  (right, colour-coded)
-        if self.backend.ping_ms is not None:
-            ping_str = f"{self.backend.ping_ms:.0f}ms"
-            if self.backend.ping_ms < 30:
+        # End-to-end latency  (right, colour-coded)
+        if self.backend.latency_ms is not None:
+            ping_str = f"{self.backend.latency_ms:.0f}ms"
+            if self.backend.latency_ms < 120:
                 pc = (1.00, 0.55, 0.05)
-            elif self.backend.ping_ms < 80:
+            elif self.backend.latency_ms < 250:
                 pc = (0.92, 0.72, 0.08)
             else:
                 pc = (0.95, 0.22, 0.18)
@@ -984,6 +1026,7 @@ class ReceiverApp(Gtk.Window):
         be = self.backends[camera_id]
         be.stop()
         be.port = port
+        be.latency_port = port + LATENCY_PORT_OFFSET
         if enabled:
             if be.build() and be.start():
                 if camera_id < len(self.ports):
@@ -1339,6 +1382,8 @@ def print_receiver_startup_config(args, default_camera_count, default_base_port)
     print(f"Default camera count   : {default_camera_count}")
     print(f"Default base port      : {default_base_port}")
     print(f"Default ports          : {[default_base_port + i for i in range(default_camera_count)]}")
+    print(f"Latency UDP offset     : +{LATENCY_PORT_OFFSET} (per cam telemetry)")
+    print("Latency note           : accurate one-way latency needs clock sync (NTP/PTP)")
     print("Default settings/cam   : bitrate=1000000, fps=25")
     print("=" * 70 + "\n")
 
@@ -1371,7 +1416,7 @@ Example usage:
     parser.add_argument("-H", "--height", type=int, default=1080,
                         help="Decode height per feed")
     parser.add_argument("-i", "--host",   type=str, default="127.0.0.1",
-                        help="Transmitter IP (used for ping measurement)")
+                        help="Transmitter IP (used for control and latency telemetry source)")
     parser.add_argument("--control-port", type=int, default=7000,
                         help="UDP control port used by transmitter settings channel")
     args = parser.parse_args()
