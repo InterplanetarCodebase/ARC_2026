@@ -168,6 +168,9 @@ def main() -> None:
 				conf=effective_conf,
 				device=args.device,
 				verbose=False,
+				half=True,
+				augment=False,
+				
 			)[0]
 
 			annotated = result.plot()

@@ -1,0 +1,10 @@
+opencv-python
+ultralytics
+torch
+numpy
+pygame
+pyserial
+psutil
+nvidia-ml-py3
+PyGObject
+pycairo
