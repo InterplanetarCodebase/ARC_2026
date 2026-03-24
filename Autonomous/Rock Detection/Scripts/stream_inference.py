@@ -4,6 +4,10 @@ import argparse
 import time
 from pathlib import Path
 
+from resource_monitor import ResourceMonitor, configure_opencv_runtime
+
+configure_opencv_runtime()
+
 import cv2
 from ultralytics import YOLO
 
@@ -15,7 +19,7 @@ def parse_args() -> argparse.Namespace:
 	parser.add_argument(
 		"--model",
 		type=str,
-		default="segment.pt",
+		required=True,
 		help="Path to segmentation model weights (.pt/.engine/.onnx)",
 	)
 	parser.add_argument(
@@ -38,10 +42,18 @@ def parse_args() -> argparse.Namespace:
 		help="Resize incoming frames to this height before inference/display",
 	)
 	parser.add_argument(
+		"--primary-conf",
 		"--conf",
+		dest="primary_conf",
 		type=float,
 		default=0.40,
-		help="Confidence threshold (minimum 0.40 is enforced for segmentation display)",
+		help="Primary confidence threshold used for inference",
+	)
+	parser.add_argument(
+		"--segment-min-conf",
+		type=float,
+		default=0.40,
+		help="Minimum confidence floor applied in segment mode",
 	)
 	parser.add_argument(
 		"--device",
@@ -66,6 +78,24 @@ def parse_args() -> argparse.Namespace:
 		action="store_true",
 		help="Save annotated stream to runs/iphone_segment/output.mp4",
 	)
+	parser.add_argument(
+		"--save-path",
+		type=str,
+		default="runs/iphone_segment/output.mp4",
+		help="Output video path when --save is enabled",
+	)
+	parser.add_argument(
+		"--monitor-interval",
+		type=float,
+		default=0.4,
+		help="Sampling interval in seconds for CPU/GPU monitoring",
+	)
+	parser.add_argument(
+		"--fallback-fps",
+		type=float,
+		default=25.0,
+		help="Fallback FPS used when capture FPS is unavailable",
+	)
 	return parser.parse_args()
 
 
@@ -89,21 +119,22 @@ def main() -> None:
 
 	model = YOLO(str(model_path))
 	source = parse_source(args.source)
-	effective_conf = max(args.conf, 0.40)
+	effective_conf = max(args.primary_conf, args.segment_min_conf)
 
 	writer = None
 	out_path = None
 
 	if args.save:
-		out_dir = Path("runs/iphone_segment")
-		out_dir.mkdir(parents=True, exist_ok=True)
-		out_path = out_dir / "output.mp4"
+		out_path = Path(args.save_path)
+		out_path.parent.mkdir(parents=True, exist_ok=True)
 
 	print("Live segmentation started. Press 'q' to quit.")
 	print(f"Model: {model_path.resolve()}")
 	print(f"Source: {args.source}")
 	print(f"Frame resize: {args.frame_width}x{args.frame_height}")
 	print(f"Confidence threshold in use: {effective_conf:.2f}")
+	monitor = ResourceMonitor(update_interval_s=args.monitor_interval)
+	monitor.sample(force=True)
 
 	cap = open_capture(source)
 
@@ -130,11 +161,13 @@ def main() -> None:
 			)[0]
 
 			annotated = result.plot()
+			monitor.sample()
+			monitor.draw_overlay(annotated)
 
 			if args.save:
 				if writer is None:
 					fps = cap.get(cv2.CAP_PROP_FPS)
-					fps = fps if fps and fps > 0 else 25.0
+					fps = fps if fps and fps > 0 else args.fallback_fps
 					h, w = annotated.shape[:2]
 					fourcc = cv2.VideoWriter_fourcc(*"mp4v")
 					writer = cv2.VideoWriter(str(out_path), fourcc, fps, (w, h))
@@ -150,6 +183,8 @@ def main() -> None:
 			writer.release()
 			print(f"Saved output video: {out_path.resolve()}")
 		cv2.destroyAllWindows()
+		monitor.print_averages("Average usage for this run")
+		monitor.close()
 
 
 if __name__ == "__main__":

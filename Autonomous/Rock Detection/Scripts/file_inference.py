@@ -5,17 +5,20 @@ import os
 import tempfile
 from pathlib import Path
 
+from resource_monitor import ResourceMonitor, configure_opencv_runtime
+
+configure_opencv_runtime()
+
 import cv2
 import torch
 from ultralytics import YOLO
 
 
-os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
 
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
 VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".m4v", ".wmv", ".flv"}
-DISPLAY_SIZE = (1280, 720)
 
 
 def parse_args() -> argparse.Namespace:
@@ -25,7 +28,7 @@ def parse_args() -> argparse.Namespace:
 	parser.add_argument(
 		"--model",
 		type=str,
-		default="segment.pt",
+		required=True,
 		help="Path to model (.pt/.engine/.onnx)",
 	)
 	parser.add_argument(
@@ -64,6 +67,42 @@ def parse_args() -> argparse.Namespace:
 		type=float,
 		default=0.0,
 		help="Override playback FPS for videos (0 keeps source FPS)",
+	)
+	parser.add_argument(
+		"--fallback-fps",
+		type=float,
+		default=25.0,
+		help="Fallback FPS used when source FPS is unavailable",
+	)
+	parser.add_argument(
+		"--display-width",
+		type=int,
+		default=1280,
+		help="Display width for interactive image viewing",
+	)
+	parser.add_argument(
+		"--display-height",
+		type=int,
+		default=720,
+		help="Display height for interactive image viewing",
+	)
+	parser.add_argument(
+		"--video-window-title",
+		type=str,
+		default="Interactive Video Inference (q: quit)",
+		help="OpenCV window title for video inference mode",
+	)
+	parser.add_argument(
+		"--image-window-title",
+		type=str,
+		default="Interactive Image Inference (h: prev, l: next, q: quit)",
+		help="Base OpenCV window title for image viewing mode",
+	)
+	parser.add_argument(
+		"--monitor-interval",
+		type=float,
+		default=0.4,
+		help="Sampling interval in seconds for CPU/GPU monitoring",
 	)
 	return parser.parse_args()
 
@@ -105,7 +144,13 @@ def predict_with_fallback(model: YOLO, frame, args: argparse.Namespace):
 		)[0]
 
 
-def run_on_video(model: YOLO, source: Path, temp_dir: Path, args: argparse.Namespace) -> None:
+def run_on_video(
+	model: YOLO,
+	source: Path,
+	temp_dir: Path,
+	args: argparse.Namespace,
+	monitor: ResourceMonitor,
+) -> None:
 	cap = cv2.VideoCapture(str(source))
 	if not cap.isOpened():
 		raise RuntimeError(f"Unable to open video: {source}")
@@ -115,9 +160,9 @@ def run_on_video(model: YOLO, source: Path, temp_dir: Path, args: argparse.Names
 	writer = None
 
 	frame_count = 0
-	window_name = "Interactive Video Inference (q: quit)"
+	window_name = args.video_window_title
 	src_fps = cap.get(cv2.CAP_PROP_FPS)
-	fps = args.fps if args.fps > 0 else (src_fps if src_fps and src_fps > 0 else 25.0)
+	fps = args.fps if args.fps > 0 else (src_fps if src_fps and src_fps > 0 else args.fallback_fps)
 	wait_ms = max(1, int(1000 / fps))
 	try:
 		while True:
@@ -127,6 +172,8 @@ def run_on_video(model: YOLO, source: Path, temp_dir: Path, args: argparse.Names
 
 			result = predict_with_fallback(model, frame, args)
 			annotated = result.plot()
+			monitor.sample()
+			monitor.draw_overlay(annotated)
 
 			if writer is None:
 				h, w = annotated.shape[:2]
@@ -149,7 +196,11 @@ def run_on_video(model: YOLO, source: Path, temp_dir: Path, args: argparse.Names
 
 
 def build_annotated_images(
-	model: YOLO, image_paths: list[Path], temp_dir: Path, args: argparse.Namespace
+	model: YOLO,
+	image_paths: list[Path],
+	temp_dir: Path,
+	args: argparse.Namespace,
+	monitor: ResourceMonitor,
 ) -> list[Path]:
 	temp_dir.mkdir(parents=True, exist_ok=True)
 	annotated_paths: list[Path] = []
@@ -162,6 +213,8 @@ def build_annotated_images(
 
 		result = predict_with_fallback(model, frame, args)
 		annotated = result.plot()
+		monitor.sample()
+		monitor.draw_overlay(annotated)
 
 		out_path = temp_dir / f"{idx:05d}_{image_path.name}"
 		ok = cv2.imwrite(str(out_path), annotated)
@@ -173,18 +226,18 @@ def build_annotated_images(
 	return annotated_paths
 
 
-def interactive_image_view(annotated_paths: list[Path]) -> None:
+def interactive_image_view(annotated_paths: list[Path], args: argparse.Namespace) -> None:
 	if not annotated_paths:
 		raise RuntimeError("No annotated images available to display.")
 
 	index = 0
-	window_name = "Interactive Image Inference (h: prev, l: next, q: quit)"
+	window_name = args.image_window_title
 
 	while True:
 		img = cv2.imread(str(annotated_paths[index]))
 		if img is None:
 			raise RuntimeError(f"Failed to open annotated image: {annotated_paths[index]}")
-		img = cv2.resize(img, DISPLAY_SIZE, interpolation=cv2.INTER_AREA)
+		img = cv2.resize(img, (args.display_width, args.display_height), interpolation=cv2.INTER_AREA)
 
 		title = f"{window_name} [{index + 1}/{len(annotated_paths)}]"
 		cv2.imshow(title, img)
@@ -218,39 +271,45 @@ def main() -> None:
 	print(
 		f"Inference settings -> device={args.device}, imgsz={args.imgsz}, half={args.half}"
 	)
+	monitor = ResourceMonitor(update_interval_s=args.monitor_interval)
+	monitor.sample(force=True)
 
-	with tempfile.TemporaryDirectory(prefix="file_inference_") as temp_root:
-		temp_dir = Path(temp_root)
-		print(f"Using temporary folder: {temp_dir}")
+	try:
+		with tempfile.TemporaryDirectory(prefix="file_inference_") as temp_root:
+			temp_dir = Path(temp_root)
+			print(f"Using temporary folder: {temp_dir}")
 
-		if source_path.is_dir():
-			image_paths = sorted(
-				p for p in source_path.iterdir() if p.is_file() and is_image(p)
+			if source_path.is_dir():
+				image_paths = sorted(
+					p for p in source_path.iterdir() if p.is_file() and is_image(p)
+				)
+				if not image_paths:
+					raise RuntimeError(f"No supported images found in directory: {source_path.resolve()}")
+
+				print(f"Running inference on {len(image_paths)} images...")
+				annotated_paths = build_annotated_images(model, image_paths, temp_dir, args, monitor)
+				print("Ready. Use 'h' for previous, 'l' for next, 'q' to quit.")
+				interactive_image_view(annotated_paths, args)
+				return
+
+			if source_path.is_file() and is_image(source_path):
+				print("Running inference on single image...")
+				annotated_paths = build_annotated_images(model, [source_path], temp_dir, args, monitor)
+				print("Ready. Use 'h' for previous, 'l' for next, 'q' to quit.")
+				interactive_image_view(annotated_paths, args)
+				return
+
+			if source_path.is_file() and is_video(source_path):
+				print("Running interactive inference on video... (press 'q' to quit)")
+				run_on_video(model, source_path, temp_dir, args, monitor)
+				return
+
+			raise RuntimeError(
+				"Unsupported source type. Provide a video file, image file, or image directory."
 			)
-			if not image_paths:
-				raise RuntimeError(f"No supported images found in directory: {source_path.resolve()}")
-
-			print(f"Running inference on {len(image_paths)} images...")
-			annotated_paths = build_annotated_images(model, image_paths, temp_dir, args)
-			print("Ready. Use 'h' for previous, 'l' for next, 'q' to quit.")
-			interactive_image_view(annotated_paths)
-			return
-
-		if source_path.is_file() and is_image(source_path):
-			print("Running inference on single image...")
-			annotated_paths = build_annotated_images(model, [source_path], temp_dir, args)
-			print("Ready. Use 'h' for previous, 'l' for next, 'q' to quit.")
-			interactive_image_view(annotated_paths)
-			return
-
-		if source_path.is_file() and is_video(source_path):
-			print("Running interactive inference on video... (press 'q' to quit)")
-			run_on_video(model, source_path, temp_dir, args)
-			return
-
-		raise RuntimeError(
-			"Unsupported source type. Provide a video file, image file, or image directory."
-		)
+	finally:
+		monitor.print_averages("Average usage for this run")
+		monitor.close()
 
 
 if __name__ == "__main__":
