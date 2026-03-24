@@ -3,6 +3,7 @@
 This module provides real-time rock detection and segmentation using YOLO models.
 It includes:
 - Live inference (`run.py`)
+- Advanced inference scripts with resource monitoring (`Scripts/`)
 - Trained model weights (`Models/`)
 - Dataset references (`Datasets/`)
 - Jetson deployment helpers (`Scripts/`)
@@ -22,9 +23,13 @@ Rock Detection/
 │   ├── segment.pt
 │   └── models.md
 └── Scripts/
-		├── export_to_onnx.py
-		├── build_tensorrt_engine.sh
-		└── JETSON_DEPLOY.md
+    ├── camera_inference.py
+    ├── file_inference.py
+    ├── stream_inference.py
+    ├── resource_monitor.py
+    ├── export_to_onnx.py
+    ├── build_tensorrt_engine.sh
+    └── JETSON_DEPLOY.md
 ```
 
 ## Requirements
@@ -35,7 +40,13 @@ Install dependencies:
 
 ```bash
 python3 -m pip install --upgrade pip
-python3 -m pip install ultralytics opencv-python
+python3 -m pip install ultralytics opencv-python torch psutil nvidia-ml-py3
+```
+
+Or install from the project root using:
+
+```bash
+python3 -m pip install -r requirements.txt
 ```
 
 ## Quick Start
@@ -76,6 +87,136 @@ Example with saved output:
 ```bash
 python3 run.py --mode detect --model Models/detection.pt --source 0 --save
 ```
+
+## Advanced Inference Scripts
+
+The `Scripts/` directory contains enhanced inference tools with resource monitoring and additional features:
+
+### `camera_inference.py`
+
+Live camera/stream inference with real-time resource monitoring and performance optimizations.
+
+**Features:**
+- Real-time CPU, RAM, and GPU usage overlay
+- Half precision (FP16) inference support for reduced VRAM
+- Configurable confidence thresholds for detection and segmentation
+- Video output saving with custom paths
+- Support for webcams, video files, and network streams
+
+**Example usage:**
+
+```bash
+# Basic webcam inference
+python3 Scripts/camera_inference.py --model Models/segment.pt --source 0 --imgsz 960
+
+# With half precision and custom confidence
+python3 Scripts/camera_inference.py --mode segment --model Models/segment.pt --source 0 --imgsz 960 --primary-conf 0.35 --device 0
+
+# Save output video
+python3 Scripts/camera_inference.py --model Models/detection.pt --source 0 --save --save-path output/detection.mp4
+```
+
+**Key arguments:**
+- `--mode`: `detect` or `segment`
+- `--model`: Model path (.pt/.engine/.onnx)
+- `--source`: Camera index or stream URL
+- `--imgsz`: Inference image size (default 640)
+- `--primary-conf` / `--conf`: Primary confidence threshold (default 0.25)
+- `--segment-min-conf`: Minimum confidence for segmentation mode (default 0.40)
+- `--cam-width` / `--cam-height`: Camera resolution (default 1920x1080)
+- `--save`: Save annotated output
+- `--save-path`: Output video path (default `runs/live_detect/output.mp4`)
+- `--monitor-interval`: Resource monitoring sample rate in seconds (default 0.4)
+
+### `file_inference.py`
+
+Interactive inference on images, videos, or image directories with keyboard navigation and OOM fallback.
+
+**Features:**
+- Interactive image viewer with keyboard controls (h: previous, l: next, q: quit)
+- Video playback with real-time inference
+- Directory batch processing
+- Half precision (FP16) support
+- Automatic CUDA OOM fallback to CPU
+- Resource monitoring overlay
+- Temporary file handling for processed outputs
+
+**Example usage:**
+
+```bash
+# Run on single image
+python3 Scripts/file_inference.py --model Models/segment.pt --source test_images/image.png --imgsz 960 --conf 0.40
+
+# Run on image directory
+python3 Scripts/file_inference.py --model Models/segment.pt --source test_images/ --imgsz 960 --half
+
+# Run on video with half precision
+python3 Scripts/file_inference.py --model Models/detection.pt --source video.mp4 --imgsz 960 --half --device 0
+```
+
+**Key arguments:**
+- `--model`: Model path (.pt/.engine/.onnx)
+- `--source`: Path to image, video, or directory
+- `--imgsz`: Inference image size (default 960)
+- `--conf`: Confidence threshold (default 0.40)
+- `--half`: Enable FP16 inference for reduced VRAM
+- `--device`: Inference device (default "0")
+- `--oom-fallback-device`: Fallback device for CUDA OOM (default "cpu")
+- `--oom-fallback-imgsz`: Reduced image size for OOM retry (default 640)
+- `--fps`: Override video playback FPS (0 keeps source FPS)
+- `--display-width` / `--display-height`: Display resolution for images (default 1280x720)
+
+**Supported formats:**
+- Images: `.jpg`, `.jpeg`, `.png`, `.bmp`, `.webp`, `.tif`, `.tiff`
+- Videos: `.mp4`, `.mov`, `.avi`, `.mkv`, `.m4v`, `.wmv`, `.flv`
+
+### `stream_inference.py`
+
+Live segmentation from webcam or iPhone/network camera streams with automatic reconnection.
+
+**Features:**
+- Network stream support (RTSP, HTTP)
+- Automatic reconnection on stream drops
+- Frame resizing for consistent processing
+- Resource monitoring overlay
+- Video output saving
+
+**Example usage:**
+
+```bash
+# Webcam inference
+python3 Scripts/stream_inference.py --model Models/segment.pt --source 0 --imgsz 960
+
+# iPhone camera stream (using app like IP Webcam)
+python3 Scripts/stream_inference.py --model Models/segment.pt --source "rtsp://192.168.1.100:8080/h264_ulaw.sdp" --imgsz 960
+
+# With custom frame size and save output
+python3 Scripts/stream_inference.py --model Models/segment.pt --source 0 --frame-width 1280 --frame-height 720 --save
+```
+
+**Key arguments:**
+- `--model`: Model path (.pt/.engine/.onnx)
+- `--source`: Camera index or stream URL (rtsp/http)
+- `--imgsz`: Inference image size (default 960)
+- `--frame-width` / `--frame-height`: Resize incoming frames (default 1280x720)
+- `--primary-conf` / `--conf`: Confidence threshold (default 0.40)
+- `--segment-min-conf`: Minimum confidence floor (default 0.40)
+- `--reconnect-delay`: Seconds to wait before reconnecting (default 2.0)
+- `--save`: Save output video
+- `--window`: Custom window title
+
+### `resource_monitor.py`
+
+Utility module providing CPU, RAM, and GPU monitoring with on-screen overlay display.
+
+**Features:**
+- Process-level CPU and RAM monitoring (via `psutil`)
+- System GPU utilization and process GPU memory tracking (via `nvidia-ml-py3`/pynvml)
+- Real-time overlay rendering on video frames
+- Average usage statistics reporting
+- OpenCV runtime configuration and log filtering
+
+This module is automatically imported by the inference scripts and requires `psutil` and `nvidia-ml-py3` packages.
 
 ## Models
 
@@ -132,6 +273,16 @@ Use `train.ipynb` for model training and experimentation.
 - Low FPS:
 	- Reduce `--imgsz` (for example `640` or `800`).
 	- Use GPU with `--device 0`.
+	- Enable `--half` flag for FP16 inference (camera_inference.py, file_inference.py).
 - Missed far/small rocks:
 	- Increase `--imgsz` (for example `960`) if compute allows.
 	- Revisit training data balance and label quality.
+- CUDA out of memory:
+	- Enable `--half` flag for reduced VRAM usage.
+	- Use `file_inference.py` which has automatic OOM fallback to CPU.
+	- Reduce `--imgsz` to a lower value.
+- Resource monitor not showing GPU stats:
+	- Ensure `nvidia-ml-py3` is installed: `pip install nvidia-ml-py3`
+	- Verify NVIDIA drivers are properly installed.
+	- GPU monitoring only works on NVIDIA GPUs with CUDA support.
+
