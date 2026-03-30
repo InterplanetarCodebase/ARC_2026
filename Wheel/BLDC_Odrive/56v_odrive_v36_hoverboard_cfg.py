@@ -1,10 +1,3 @@
-#!/usr/bin/env python3
-"""These configurations were based off the original ODrive hoverboard tutorial website.
-
-@author: Austin Owens
-@date: 5/5/2024
-"""
-
 import argparse
 import sys
 import time
