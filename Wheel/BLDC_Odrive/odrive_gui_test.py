@@ -5,11 +5,10 @@ ODrive GUI Velocity Controller
 Dark navy-blue / orange themed dashboard with live Matplotlib
 plotting and large, readable telemetry readouts.
 
-Keys (when the window has focus):
-  W  →  Forward  (at set velocity magnitude)
-  S  →  Reverse  (negative of set velocity magnitude)
-  Q  →  Quit and idle motors
-  Any other key / no key held → Stop (0 turn/s)
+Drive controls (GUI toggle buttons):
+    FWD  →  Toggle forward at set velocity magnitude
+    REV  →  Toggle reverse at set velocity magnitude
+    STOP →  Stop (0 turn/s)
 
 Velocity input field:
   Enter any value between -5 and 5 turns/s.
@@ -226,7 +225,7 @@ class ODriveApp:
         self.vel_mag   = 1.0        # magnitude controlled by input field
         self.running   = True
         self.start_t   = time.time()
-        self.keys_held = set()
+        self.drive_mode = "stop"   # one of: stop, fwd, rev
 
         # Position calibration state
         self._cal_done    = False
@@ -244,7 +243,8 @@ class ODriveApp:
         self.cmd_buf  = collections.deque(maxlen=N)
 
         self._build_ui()
-        self._bind_keys()
+        self._bind_window_events()
+        self._refresh_drive_buttons()
         self._start_data_thread()
         self._start_animation()
 
@@ -301,23 +301,39 @@ class ODriveApp:
         inner.pack(fill=tk.X, padx=12, pady=(4, pady_inner))
         return inner
 
-    # ── Control panel (keys + velocity input) ──────────────────
+    # ── Control panel (toggle drive + velocity input) ──────────
     def _build_control_panel(self, parent):
-        frame = self._card(parent, "KEY CONTROL  +  VELOCITY INPUT")
+        frame = self._card(parent, "TOGGLE DRIVE CONTROL  +  VELOCITY INPUT")
 
-        # W / S key tiles
+        # Toggle drive buttons
         key_row = tk.Frame(frame, bg=BG_CARD)
         key_row.pack(anchor=tk.W, pady=6)
-        self.w_btn = tk.Label(key_row, text=" W ", font=self._f(26, "bold"),
-                              bg=FG_DIM, fg=FG_WHITE, padx=4, pady=2)
-        self.w_btn.pack(side=tk.LEFT, padx=(0, 6))
-        tk.Label(key_row, text="FWD", font=self._f(10),
-                 bg=BG_CARD, fg=FG_GRAY).pack(side=tk.LEFT, padx=(0, 20))
-        self.s_btn = tk.Label(key_row, text=" S ", font=self._f(26, "bold"),
-                              bg=FG_DIM, fg=FG_WHITE, padx=4, pady=2)
-        self.s_btn.pack(side=tk.LEFT, padx=(0, 6))
-        tk.Label(key_row, text="REV", font=self._f(10),
-                 bg=BG_CARD, fg=FG_GRAY).pack(side=tk.LEFT)
+        self.fwd_btn = tk.Button(
+            key_row, text="FWD", font=self._f(12, "bold"),
+            bg=FG_DIM, fg=FG_WHITE,
+            activebackground=GREEN_OK, activeforeground=BG_DEEP,
+            relief=tk.FLAT, bd=0, padx=14, pady=8, cursor="hand2",
+            command=lambda: self._toggle_direction("fwd"),
+        )
+        self.fwd_btn.pack(side=tk.LEFT, padx=(0, 10))
+
+        self.rev_btn = tk.Button(
+            key_row, text="REV", font=self._f(12, "bold"),
+            bg=FG_DIM, fg=FG_WHITE,
+            activebackground=RED_ERR, activeforeground=BG_DEEP,
+            relief=tk.FLAT, bd=0, padx=14, pady=8, cursor="hand2",
+            command=lambda: self._toggle_direction("rev"),
+        )
+        self.rev_btn.pack(side=tk.LEFT, padx=(0, 10))
+
+        self.stop_btn = tk.Button(
+            key_row, text="STOP", font=self._f(12, "bold"),
+            bg=BG_PANEL, fg=FG_WHITE,
+            activebackground=ACCENT2, activeforeground=BG_DEEP,
+            relief=tk.FLAT, bd=0, padx=14, pady=8, cursor="hand2",
+            command=self._stop_drive,
+        )
+        self.stop_btn.pack(side=tk.LEFT)
 
         # Velocity input row
         tk.Label(frame, text="Velocity magnitude  (−5 … +5 turn/s):",
@@ -367,8 +383,33 @@ class ODriveApp:
         self.vel_canvas.pack(fill=tk.X, pady=(10, 4))
         self.vel_canvas.bind("<Configure>", self._draw_vel_bar)
 
-        tk.Label(frame, text="Q → Quit & idle motors", font=self._f(9),
+        tk.Label(frame, text="Use window close button to quit & idle motors", font=self._f(9),
                  bg=BG_CARD, fg=FG_DIM).pack(anchor=tk.W, pady=(4, 0))
+
+    def _toggle_direction(self, direction):
+        if self.drive_mode == direction:
+            self.drive_mode = "stop"
+        else:
+            self.drive_mode = direction
+        self._update_cmd()
+
+    def _stop_drive(self):
+        self.drive_mode = "stop"
+        self._update_cmd()
+
+    def _refresh_drive_buttons(self):
+        self.fwd_btn.configure(
+            bg=GREEN_OK if self.drive_mode == "fwd" else FG_DIM,
+            fg=BG_DEEP if self.drive_mode == "fwd" else FG_WHITE,
+        )
+        self.rev_btn.configure(
+            bg=RED_ERR if self.drive_mode == "rev" else FG_DIM,
+            fg=BG_DEEP if self.drive_mode == "rev" else FG_WHITE,
+        )
+        self.stop_btn.configure(
+            bg=ACCENT2 if self.drive_mode == "stop" else BG_PANEL,
+            fg=BG_DEEP if self.drive_mode == "stop" else FG_WHITE,
+        )
 
     def _apply_vel_input(self):
         raw = self.vel_input_var.get().strip()
@@ -487,32 +528,21 @@ class ODriveApp:
         self.canvas = FigureCanvasTkAgg(fig, master=parent)
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
-    # ── Key bindings ───────────────────────────────────────────
-    def _bind_keys(self):
-        self.root.bind("<KeyPress>",   self._on_key_press)
-        self.root.bind("<KeyRelease>", self._on_key_release)
+    # ── Window events ──────────────────────────────────────────
+    def _bind_window_events(self):
         self.root.protocol("WM_DELETE_WINDOW", self._quit)
-
-    def _on_key_press(self, event):
-        if event.widget is self._vel_entry:
-            return                          # let the entry handle its own keys
-        k = event.keysym.lower()
-        if k == "q": self._quit(); return
-        self.keys_held.add(k)
-        self._update_cmd()
-
-    def _on_key_release(self, event):
-        if event.widget is self._vel_entry:
-            return
-        self.keys_held.discard(event.keysym.lower())
-        self._update_cmd()
+        # Global quit hotkeys so it works even when Entry has focus.
+        self.root.bind_all("<KeyPress-q>", lambda _: self._quit())
+        self.root.bind_all("<KeyPress-Q>", lambda _: self._quit())
 
     def _update_cmd(self):
-        w = "w" in self.keys_held
-        s = "s" in self.keys_held
-        if   w and not s: self.cmd_vel = +self.vel_mag
-        elif s and not w: self.cmd_vel = -self.vel_mag
-        else:             self.cmd_vel =  0.0
+        if self.drive_mode == "fwd":
+            self.cmd_vel = +self.vel_mag
+        elif self.drive_mode == "rev":
+            self.cmd_vel = -self.vel_mag
+        else:
+            self.cmd_vel = 0.0
+        self._refresh_drive_buttons()
 
     # ── Position calibration ───────────────────────────────────
     def _calibrate_pos(self, axis_id, raw_pos):
@@ -567,13 +597,28 @@ class ODriveApp:
                 self.cur1_buf.append(a1["current"])
                 self.cmd_buf.append(self.cmd_vel)
 
-                self.root.after(0, self._update_labels,
-                                a0, a1, cal0, cal1, vbus, now)
+                # During shutdown widgets may already be destroyed;
+                # ignore late UI callbacks from the worker thread.
+                if self.running:
+                    try:
+                        self.root.after(0, self._update_labels,
+                                        a0, a1, cal0, cal1, vbus, now)
+                    except tk.TclError:
+                        break
             except Exception as e:
                 print(f"[data_loop] {e}")
             time.sleep(max(0.0, interval - (time.time() - t0)))
 
     def _update_labels(self, a0, a1, cal0, cal1, vbus, now):
+        # Ignore callbacks that arrive after the UI has started closing.
+        if not self.running:
+            return
+        try:
+            if not self.root.winfo_exists():
+                return
+        except tk.TclError:
+            return
+
         mins, secs = divmod(int(now), 60)
         self.timer_var.set(f"{mins:02d}:{secs:02d}")
 
@@ -584,15 +629,7 @@ class ODriveApp:
         self.vel_label.configure(fg=col)
         self._draw_vel_bar()
 
-        if self.cmd_vel > 0:
-            self.w_btn.configure(bg=GREEN_OK, fg=BG_DEEP)
-            self.s_btn.configure(bg=FG_DIM,   fg=FG_WHITE)
-        elif self.cmd_vel < 0:
-            self.w_btn.configure(bg=FG_DIM,  fg=FG_WHITE)
-            self.s_btn.configure(bg=RED_ERR, fg=BG_DEEP)
-        else:
-            self.w_btn.configure(bg=FG_DIM, fg=FG_WHITE)
-            self.s_btn.configure(bg=FG_DIM, fg=FG_WHITE)
+        self._refresh_drive_buttons()
 
         def fmt(v): return f"{v:+.3f}"
         self.a0_pos.set(fmt(cal0));              self.a1_pos.set(fmt(cal1))
@@ -652,11 +689,21 @@ class ODriveApp:
         self.running = False
         try:
             set_velocity(self.odrv, 0.0)
+        except Exception:
+            pass
+        try:
             time.sleep(0.15)
+        except Exception:
+            pass
+        try:
             idle_motors(self.odrv)
         except Exception:
             pass
-        self.root.destroy()
+        try:
+            if self.root.winfo_exists():
+                self.root.destroy()
+        except tk.TclError:
+            pass
 
 
 # ══════════════════════════════════════════════════════════════
