@@ -10,7 +10,7 @@ Accepts connections from two sources (abstracted via same WS interface):
 Packet format:
   [0xAA][0xBB][SEQ_H][SEQ_L][x_i8][z_i8][0xFF][CRC8]
 
-Differential drive:
+Differential drive:ws_to_diffdrive.py
   left  = x - z
   right = x + z
 
