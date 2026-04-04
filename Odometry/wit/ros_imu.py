@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """
 WitMotion BWT901CL — Full ROS2 Publisher Node
-Publishes: IMU, MagneticField, Temperature, PoseStamped, Odometry + TF
+Publishes: IMU, 9-axis vectors, MagneticField, Temperature, PoseStamped, Odometry + TF
+
+Fixes applied:
+  1. Static TF broadcast: base_link → imu_link (completes the TF tree)
+  2. Velocity exponential decay (prevents dead-reckoning drift at rest)
+  3. _print_status method fully intact (no orphaned stubs)
 """
 
 import serial
@@ -20,18 +25,23 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 
 from std_msgs.msg       import Header
 from sensor_msgs.msg    import Imu, MagneticField, Temperature
-from geometry_msgs.msg  import PoseStamped, Vector3, TransformStamped
+from geometry_msgs.msg  import PoseStamped, Vector3, Vector3Stamped, TransformStamped
 from nav_msgs.msg       import Odometry
-from tf2_ros            import TransformBroadcaster
+from tf2_ros            import TransformBroadcaster, StaticTransformBroadcaster
 
 
 # ════════════════════════════════════════════════════════════════════════════
 #  Helpers
 # ════════════════════════════════════════════════════════════════════════════
 
-DEG2RAD = math.pi / 180.0
-G_TO_MS2 = 9.81          # 1 g  →  m/s²
-UT_TO_T  = 1e-6          # µT   →  Tesla
+DEG2RAD  = math.pi / 180.0
+G_TO_MS2 = 9.81       # 1 g  →  m/s²
+UT_TO_T  = 1e-6       # µT   →  Tesla
+
+# Dead-reckoning velocity decay per integration step.
+# Range 0.0 (instant zero) … 1.0 (no decay / original drift behaviour).
+# 0.85 kills sensor noise accumulation while preserving real motion briefly.
+VELOCITY_DECAY = 0.85
 
 
 def euler_to_quaternion(roll_deg: float, pitch_deg: float, yaw_deg: float):
@@ -94,8 +104,8 @@ def rotate_to_world(ax, ay, az, roll_deg, pitch_deg, yaw_deg):
 class BWT901CLNode(Node):
 
     # ── Tuning knobs ─────────────────────────────────────────────────────────
-    ACCEL_DEADBAND   = 0.05   # m/s²  — zero out tiny accelerations at rest
-    PRINT_EVERY_N    = 20     # print to terminal every N packets (~2 Hz @ 10 Hz sensor)
+    ACCEL_DEADBAND = 0.05   # m/s²  — zero out tiny accelerations at rest
+    PRINT_EVERY_N  = 20     # print to terminal every N packets (~2 Hz @ 10 Hz sensor)
 
     def __init__(self):
         super().__init__('bwt901cl_imu_node')
@@ -121,19 +131,18 @@ class BWT901CLNode(Node):
         )
 
         # ── Publishers ───────────────────────────────────────────────────────
-        # Standard sensor_msgs/Imu  (accel + gyro + orientation)
         self.imu_pub  = self.create_publisher(Imu,           'imu/data',        qos)
-        # Magnetometer
         self.mag_pub  = self.create_publisher(MagneticField, 'imu/mag',         qos)
-        # Temperature
         self.tmp_pub  = self.create_publisher(Temperature,   'imu/temperature', qos)
-        # PoseStamped — orientation only, useful for quick RViz2 check
         self.pose_pub = self.create_publisher(PoseStamped,   'imu/pose',        qos)
-        # Odometry — dead-reckoning position
         self.odom_pub = self.create_publisher(Odometry,      'imu/odom',        qos)
+        self.accel9_pub = self.create_publisher(Vector3Stamped, 'imu/axis9/accel_g',   qos)
+        self.gyro9_pub  = self.create_publisher(Vector3Stamped, 'imu/axis9/gyro_dps',  qos)
+        self.mag9_pub   = self.create_publisher(Vector3Stamped, 'imu/axis9/mag_ut',    qos)
 
-        # TF broadcaster
-        self.tf_br = TransformBroadcaster(self)
+        # ── TF broadcasters ──────────────────────────────────────────────────
+        self.tf_br        = TransformBroadcaster(self)
+        self.static_tf_br = StaticTransformBroadcaster(self)
 
         # ── Serial ───────────────────────────────────────────────────────────
         try:
@@ -145,15 +154,14 @@ class BWT901CLNode(Node):
             raise SystemExit(1)
 
         # ── Sensor state ─────────────────────────────────────────────────────
-        # Latest parsed values (raw)
-        self.angle   = None   # (roll, pitch, yaw)  degrees
-        self.accel   = None   # (ax, ay, az)         g
-        self.gyro    = None   # (gx, gy, gz)         deg/s
-        self.mag     = None   # (mx, my, mz)         µT
-        self.quat    = None   # (q0, q1, q2, q3)     unit quaternion
-        self.temp    = None   # float                 °C
+        self.angle = None   # (roll, pitch, yaw)  degrees
+        self.accel = None   # (ax, ay, az)         g
+        self.gyro  = None   # (gx, gy, gz)         deg/s
+        self.mag   = None   # (mx, my, mz)         µT
+        self.quat  = None   # (q0, q1, q2, q3)     unit quaternion
+        self.temp  = None   # float                 °C
 
-        # Zeroing offsets (captured at startup)
+        # Zeroing offsets (captured at first valid packet)
         self.angle_offsets = None
 
         # Dead-reckoning state
@@ -163,6 +171,11 @@ class BWT901CLNode(Node):
 
         # Terminal print counter
         self._print_cnt = 0
+
+        # ── FIX 1: Publish static TF base_link → imu_link ───────────────────
+        # Without this RViz2 cannot locate imu_link in the TF tree and drops
+        # all IMU/pose/odom visualisations silently.
+        self._publish_static_tf()
 
         # ── Timer: poll serial @ 100 Hz ──────────────────────────────────────
         self.timer = self.create_timer(0.01, self._read_and_publish)
@@ -177,13 +190,50 @@ class BWT901CLNode(Node):
         print("-"*60)
         print("  Topics published:")
         print("    /imu/data          sensor_msgs/Imu")
+        print("    /imu/axis9/accel_g geometry_msgs/Vector3Stamped")
+        print("    /imu/axis9/gyro_dps geometry_msgs/Vector3Stamped")
+        print("    /imu/axis9/mag_ut  geometry_msgs/Vector3Stamped")
         print("    /imu/mag           sensor_msgs/MagneticField")
         print("    /imu/temperature   sensor_msgs/Temperature")
         print("    /imu/pose          geometry_msgs/PoseStamped")
         print("    /imu/odom          nav_msgs/Odometry")
-        print("    TF: odom → base_link")
+        print("    TF:  odom → base_link  (dynamic)")
+        print("    TF:  base_link → imu_link  (static)")
         print("="*60)
         print("  ⏳  Waiting for first valid packet … keep sensor still!\n")
+
+    # ── FIX 1: Static TF publisher ───────────────────────────────────────────
+
+    def _publish_static_tf(self):
+        """
+        Broadcast the static transform base_link → imu_link.
+
+        This completes the TF chain:
+            odom  →  base_link  →  imu_link
+
+        RViz2 requires an unbroken chain from the Fixed Frame (odom) down to
+        every frame_id used in published messages. Without this link, all IMU,
+        pose and odometry displays silently show nothing.
+
+        Adjust translation x/y/z if the IMU is physically offset from the
+        robot's base_link origin (e.g. mounted 10 cm above: z=0.10).
+        """
+        st = TransformStamped()
+        st.header.stamp    = self.get_clock().now().to_msg()
+        st.header.frame_id = self.base_frame   # 'base_link'
+        st.child_frame_id  = self.imu_frame    # 'imu_link'
+
+        # Identity — IMU assumed co-located with base_link.
+        # Adjust if the sensor is offset on your robot:
+        st.transform.translation.x = 0.0
+        st.transform.translation.y = 0.0
+        st.transform.translation.z = 0.0
+        st.transform.rotation.x    = 0.0
+        st.transform.rotation.y    = 0.0
+        st.transform.rotation.z    = 0.0
+        st.transform.rotation.w    = 1.0
+
+        self.static_tf_br.sendTransform(st)
 
     # ── Serial read + parse ──────────────────────────────────────────────────
 
@@ -195,15 +245,15 @@ class BWT901CLNode(Node):
             self.get_logger().error(f"Serial read error: {e}")
             return
 
-        packets      = self.buffer.split(b'\x55')
-        self.buffer  = packets[-1]          # incomplete tail — keep for next call
+        packets     = self.buffer.split(b'\x55')
+        self.buffer = packets[-1]   # incomplete tail — keep for next call
 
         for pkt in packets[:-1]:
             self._parse_packet(pkt)
 
     def _parse_packet(self, pkt: bytes):
         """Try every pywitmotion parser on the raw packet."""
-        # ── Angle ──────────────────────────────────────────────
+
         try:
             v = wit.get_angle(pkt)
             if v is not None:
@@ -211,7 +261,6 @@ class BWT901CLNode(Node):
         except Exception:
             pass
 
-        # ── Acceleration (g) ───────────────────────────────────
         try:
             v = wit.get_acceleration(pkt)
             if v is not None:
@@ -219,7 +268,6 @@ class BWT901CLNode(Node):
         except Exception:
             pass
 
-        # ── Gyroscope (deg/s) ──────────────────────────────────
         try:
             v = wit.get_gyro(pkt)
             if v is not None:
@@ -227,7 +275,6 @@ class BWT901CLNode(Node):
         except Exception:
             pass
 
-        # ── Magnetometer (µT) ──────────────────────────────────
         try:
             v = wit.get_magnetic(pkt)
             if v is not None:
@@ -235,7 +282,6 @@ class BWT901CLNode(Node):
         except Exception:
             pass
 
-        # ── Quaternion ─────────────────────────────────────────
         try:
             v = wit.get_quaternion(pkt)
             if v is not None:
@@ -243,7 +289,6 @@ class BWT901CLNode(Node):
         except Exception:
             pass
 
-        # ── Temperature (°C) ──────────────────────────────────
         try:
             v = wit.get_temperature(pkt)
             if v is not None:
@@ -251,7 +296,7 @@ class BWT901CLNode(Node):
         except Exception:
             pass
 
-        # ── Publish once we have at minimum angle + accel ─────
+        # Publish once we have at minimum angle + accel
         if self.angle is not None and self.accel is not None:
             self._handle_full_update()
 
@@ -282,10 +327,40 @@ class BWT901CLNode(Node):
         now = self.get_clock().now()
         dt  = (now - self.last_time).nanoseconds * 1e-9
         self.last_time = now
-        if dt <= 0 or dt > 1.0:        # skip bad dt (e.g. first frame)
+        if dt <= 0 or dt > 1.0:
             return
 
+        ax_g, ay_g, az_g = self.accel
         stamp = now.to_msg()
+
+        # Publish dedicated 9-axis streams for recording and downstream use.
+        accel9_msg = Vector3Stamped()
+        accel9_msg.header.stamp = stamp
+        accel9_msg.header.frame_id = self.imu_frame
+        accel9_msg.vector.x = float(ax_g)
+        accel9_msg.vector.y = float(ay_g)
+        accel9_msg.vector.z = float(az_g)
+        self.accel9_pub.publish(accel9_msg)
+
+        if self.gyro is not None:
+            gx_deg, gy_deg, gz_deg = self.gyro
+            gyro9_msg = Vector3Stamped()
+            gyro9_msg.header.stamp = stamp
+            gyro9_msg.header.frame_id = self.imu_frame
+            gyro9_msg.vector.x = float(gx_deg)
+            gyro9_msg.vector.y = float(gy_deg)
+            gyro9_msg.vector.z = float(gz_deg)
+            self.gyro9_pub.publish(gyro9_msg)
+
+        if self.mag is not None:
+            mx_ut, my_ut, mz_ut = self.mag
+            mag9_msg = Vector3Stamped()
+            mag9_msg.header.stamp = stamp
+            mag9_msg.header.frame_id = self.imu_frame
+            mag9_msg.vector.x = float(mx_ut)
+            mag9_msg.vector.y = float(my_ut)
+            mag9_msg.vector.z = float(mz_ut)
+            self.mag9_pub.publish(mag9_msg)
 
         # ── Orientation quaternion ────────────────────────────────────────────
         # Prefer on-sensor quaternion (9-axis AHRS) if available
@@ -296,7 +371,6 @@ class BWT901CLNode(Node):
             qx, qy, qz, qw = euler_to_quaternion(rel_roll, rel_pitch, rel_yaw)
 
         # ── Dead-reckoning ───────────────────────────────────────────────────
-        ax_g, ay_g, az_g = self.accel
         ax, ay, az = remove_gravity(ax_g, ay_g, az_g, rel_roll, rel_pitch)
 
         # Apply deadband
@@ -306,9 +380,15 @@ class BWT901CLNode(Node):
 
         wx, wy, wz = rotate_to_world(ax, ay, az, rel_roll, rel_pitch, rel_yaw)
 
-        self.vx += wx * dt;  self.px += self.vx * dt
-        self.vy += wy * dt;  self.py += self.vy * dt
-        self.vz += wz * dt;  self.pz += self.vz * dt
+        # FIX 2: Exponential velocity decay prevents noise accumulation.
+        # Without decay, tiny accel bias integrates into unbounded position
+        # drift and the robot "teleports" off-screen in RViz2.
+        self.vx = (self.vx + wx * dt) * VELOCITY_DECAY
+        self.vy = (self.vy + wy * dt) * VELOCITY_DECAY
+        self.vz = (self.vz + wz * dt) * VELOCITY_DECAY
+        self.px += self.vx * dt
+        self.py += self.vy * dt
+        self.pz += self.vz * dt
 
         # ════════════════════════════════════════════════════════════════════
         #  1. sensor_msgs/Imu  →  /imu/data
@@ -317,16 +397,14 @@ class BWT901CLNode(Node):
         imu_msg.header.stamp    = stamp
         imu_msg.header.frame_id = self.imu_frame
 
-        # Orientation (from 9-axis AHRS)
         imu_msg.orientation.x = qx
         imu_msg.orientation.y = qy
         imu_msg.orientation.z = qz
         imu_msg.orientation.w = qw
-        imu_msg.orientation_covariance[0] = 1e-4   # diagonal: xx
-        imu_msg.orientation_covariance[4] = 1e-4   #           yy
-        imu_msg.orientation_covariance[8] = 1e-4   #           zz
+        imu_msg.orientation_covariance[0] = 1e-4
+        imu_msg.orientation_covariance[4] = 1e-4
+        imu_msg.orientation_covariance[8] = 1e-4
 
-        # Angular velocity (deg/s → rad/s)
         if self.gyro is not None:
             gx_deg, gy_deg, gz_deg = self.gyro
             imu_msg.angular_velocity.x = gx_deg * DEG2RAD
@@ -336,7 +414,7 @@ class BWT901CLNode(Node):
         imu_msg.angular_velocity_covariance[4] = 1e-5
         imu_msg.angular_velocity_covariance[8] = 1e-5
 
-        # Linear acceleration (g → m/s²) — RAW (gravity included)
+        # Raw acceleration (gravity included), converted to m/s²
         imu_msg.linear_acceleration.x = ax_g * G_TO_MS2
         imu_msg.linear_acceleration.y = ay_g * G_TO_MS2
         imu_msg.linear_acceleration.z = az_g * G_TO_MS2
@@ -404,7 +482,7 @@ class BWT901CLNode(Node):
         odom_msg.pose.pose.orientation.z = qz
         odom_msg.pose.pose.orientation.w = qw
 
-        odom_msg.twist.twist.linear  = Vector3(x=self.vx, y=self.vy, z=self.vz)
+        odom_msg.twist.twist.linear = Vector3(x=self.vx, y=self.vy, z=self.vz)
         if self.gyro is not None:
             gx_deg, gy_deg, gz_deg = self.gyro
             odom_msg.twist.twist.angular = Vector3(
@@ -415,7 +493,7 @@ class BWT901CLNode(Node):
         self.odom_pub.publish(odom_msg)
 
         # ════════════════════════════════════════════════════════════════════
-        #  6. TF  odom → base_link
+        #  6. TF  odom → base_link  (dynamic, updated every packet)
         # ════════════════════════════════════════════════════════════════════
         tf = TransformStamped()
         tf.header.stamp    = stamp
@@ -436,36 +514,35 @@ class BWT901CLNode(Node):
         self._print_cnt += 1
         if self._print_cnt >= self.PRINT_EVERY_N:
             self._print_cnt = 0
-            self._print_status(
-                rel_roll, rel_pitch, rel_yaw,
-                ax_g, ay_g, az_g,
-                wx, wy, wz,
-            )
+            self._print_status(rel_roll, rel_pitch, rel_yaw,
+                               ax_g, ay_g, az_g, wx, wy, wz)
+
+    # ── Terminal status printer ──────────────────────────────────────────────
 
     def _print_status(self, roll, pitch, yaw, ax_g, ay_g, az_g, wx, wy, wz):
-        gx_str = gy_str = gz_str = "  N/A  "
-        # Change "if self.gyro:" to "if self.gyro is not None:"
+        # FIX 3: Method is complete — no orphaned stubs or unreachable code.
+
         if self.gyro is not None:
             gx_str = f"{self.gyro[0]:7.2f}"
             gy_str = f"{self.gyro[1]:7.2f}"
             gz_str = f"{self.gyro[2]:7.2f}"
+        else:
+            gx_str = gy_str = gz_str = "  N/A  "
 
-        mx_str = my_str = mz_str = "  N/A  "
-        # Change "if self.mag:" to "if self.mag is not None:"
         if self.mag is not None:
             mx_str = f"{self.mag[0]:7.1f}"
             my_str = f"{self.mag[1]:7.1f}"
             mz_str = f"{self.mag[2]:7.1f}"
+        else:
+            mx_str = my_str = mz_str = "  N/A  "
 
         tmp_str = f"{self.temp:.1f} °C" if self.temp is not None else "N/A"
 
-        qw_str = "N/A"
-        # Change "if self.quat:" to "if self.quat is not None:"
         if self.quat is not None:
             qw_str = (f"w={self.quat[0]:.3f}  x={self.quat[1]:.3f}  "
-                    f"y={self.quat[2]:.3f}  z={self.quat[3]:.3f}")
-    
-    # ... rest of the print function
+                      f"y={self.quat[2]:.3f}  z={self.quat[3]:.3f}")
+        else:
+            qw_str = "N/A"
 
         print(
             f"┌── BWT901CL ─────────────────────────────────────────────────────\n"
