@@ -40,6 +40,9 @@ ROVER_PORT = 5760                      # UDP port for arm commands
 DRIVE_WS_PORT = 8765                   # ws_to_diffdrive.py WebSocket port
 DRIVE_SEND_RATE = 0.05                 # 20 Hz
 DEADZONE = 0.08
+DRIVE_SENSITIVITY_X = 0.55             # lower = less forward/back sensitivity
+DRIVE_SENSITIVITY_Z = 0.50             # lower = less turning sensitivity
+DRIVE_EXPO = 1.8                       # >1 gives finer control near center
 
 DRIVE_SOF1 = 0xAA
 DRIVE_SOF2 = 0xBB
@@ -71,7 +74,7 @@ SERVO_STEP = 2
 SEND_RATE = 0.05
 
 # Match ws_to_diffdrive.py scaling for preview values.
-VEL_MAX_TURNS_PER_S = 10.0
+VEL_MAX_TURNS_PER_S =  4.0
 
 # -- Colour palette -----------------------------------------------------------
 BG = (0, 0, 0)
@@ -105,6 +108,18 @@ def crc8(data: bytes) -> int:
 
 def clamp_i8(v: int) -> int:
 	return max(-127, min(127, v))
+
+
+def shape_drive_axis(value: float, deadzone: float, sensitivity: float, expo: float) -> float:
+	"""Apply deadzone + exponential curve to reduce joystick sensitivity."""
+	a = abs(value)
+	if a <= deadzone:
+		return 0.0
+
+	sign = 1.0 if value >= 0.0 else -1.0
+	norm = (a - deadzone) / (1.0 - deadzone)
+	shaped = (norm ** expo) * sensitivity
+	return sign * max(-1.0, min(1.0, shaped))
 
 
 # -- UDP arm sender -----------------------------------------------------------
@@ -772,8 +787,8 @@ def main():
 
 				raw_x = ax_y
 				raw_z = ax_z
-				wheel_x = raw_x if abs(raw_x) > DEADZONE else 0.0
-				wheel_z = raw_z if abs(raw_z) > DEADZONE else 0.0
+				wheel_x = shape_drive_axis(raw_x, DEADZONE, DRIVE_SENSITIVITY_X, DRIVE_EXPO)
+				wheel_z = shape_drive_axis(raw_z, DEADZONE, DRIVE_SENSITIVITY_Z, DRIVE_EXPO)
 
 				sent = drive_ws.send_drive(wheel_x, wheel_z)
 				if sent is not None:

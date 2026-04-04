@@ -47,7 +47,9 @@ PACKET_LEN   = 8
 ODRV0_SERIAL = "336D33573235"
 ODRV1_SERIAL = "335A33633235"
 
-VEL_MAX      = 5.0    # max turns/s sent to ODrive — tune this
+VEL_MAX      = 4.0    # max turns/s sent to ODrive — tune this
+CMD_TIMEOUT_S = 0.35   # safety timeout: stop if no fresh command arrives
+WATCHDOG_PERIOD_S = 0.05
 
 # ─── PROTOCOL ──────────────────────────────────────────────────────
 SOF1 = 0xAA
@@ -152,7 +154,7 @@ def setup_axis(ax, name=""):
 
     ax.controller.config.control_mode = CONTROL_MODE_VELOCITY_CONTROL
     ax.controller.config.input_mode    = INPUT_MODE_VEL_RAMP
-    ax.controller.config.vel_ramp_rate = 15.0
+    ax.controller.config.vel_ramp_rate = 20.0
     ax.controller.input_vel = 0.0
 
     log.info(f"[{name}] → CLOSED LOOP")
@@ -206,12 +208,52 @@ def idle_all(odrv0, odrv1):
 
 # ─── WEBSOCKET HANDLER ─────────────────────────────────────────────
 last_seq: dict[str, int] = {}
+connected_clients: dict[str, object] = {}
+command_clients: set[str] = set()
+last_command_ts: float = 0.0
+failsafe_active: bool = False
+
+
+async def broadcast_telemetry(payload: str):
+    stale_clients = []
+    for client_id, ws in list(connected_clients.items()):
+        try:
+            await ws.send(payload)
+        except Exception:
+            stale_clients.append(client_id)
+
+    for client_id in stale_clients:
+        connected_clients.pop(client_id, None)
+        last_seq.pop(client_id, None)
+        command_clients.discard(client_id)
+        log.info(f"Client removed during broadcast: {client_id}")
+
+
+async def command_watchdog(odrv0, odrv1):
+    global failsafe_active
+    while True:
+        await asyncio.sleep(WATCHDOG_PERIOD_S)
+
+        # Only enforce timeout when at least one client has issued commands.
+        if not command_clients:
+            continue
+
+        age = time.monotonic() - last_command_ts
+        if age > CMD_TIMEOUT_S:
+            stop(odrv0, odrv1)
+            if not failsafe_active:
+                log.warning(
+                    f"Failsafe: no command for {age:.3f}s (> {CMD_TIMEOUT_S:.3f}s). Motors set to zero."
+                )
+            failsafe_active = True
 
 def make_handler(odrv0, odrv1):
     async def handle_client(websocket):
+        global last_command_ts, failsafe_active
         client_id = f"{websocket.remote_address[0]}:{websocket.remote_address[1]}"
         log.info(f"Client connected: {client_id}")
         last_seq[client_id] = -1
+        connected_clients[client_id] = websocket
 
         try:
             async for message in websocket:
@@ -235,10 +277,15 @@ def make_handler(odrv0, odrv1):
                 left_vel  = (left  / 127.0) * VEL_MAX
                 right_vel = (right / 127.0) * VEL_MAX
 
+                command_clients.add(client_id)
                 drive(odrv0, odrv1, left_vel, right_vel)
+                last_command_ts = time.monotonic()
+                if failsafe_active:
+                    log.info("Command stream restored. Leaving failsafe state.")
+                    failsafe_active = False
 
                 telemetry = build_telemetry(odrv0, odrv1, seq)
-                await websocket.send(json.dumps(telemetry))
+                await broadcast_telemetry(json.dumps(telemetry))
 
                 log.info(
                     f"seq={seq:5d} | "
@@ -249,15 +296,21 @@ def make_handler(odrv0, odrv1):
         except websockets.exceptions.ConnectionClosed:
             log.info(f"Client disconnected: {client_id}")
         finally:
+            connected_clients.pop(client_id, None)
             last_seq.pop(client_id, None)
-            log.info(f"Stopping motors (client gone: {client_id})")
-            stop(odrv0, odrv1)   # ← safety stop on disconnect
+            command_clients.discard(client_id)
+            if not command_clients:
+                log.info(f"Stopping motors (last command client gone: {client_id})")
+                stop(odrv0, odrv1)   # safety stop only when no command clients remain
+            else:
+                log.info(f"Command client gone: {client_id} (others still active)")
 
     return handle_client
 
 # ─── MAIN ──────────────────────────────────────────────────────────
 async def main():
     odrv0, odrv1 = connect_odrives()
+    watchdog_task = asyncio.create_task(command_watchdog(odrv0, odrv1))
 
     log.info(f"WebSocket server starting on {WS_HOST}:{WS_PORT}")
     async with websockets.serve(make_handler(odrv0, odrv1), WS_HOST, WS_PORT):
@@ -267,6 +320,12 @@ async def main():
         except asyncio.CancelledError:
             pass
         finally:
+            watchdog_task.cancel()
+            try:
+                await watchdog_task
+            except asyncio.CancelledError:
+                pass
+
             log.info("Shutting down — stopping and idling motors")
             stop(odrv0, odrv1)
             time.sleep(0.2)
