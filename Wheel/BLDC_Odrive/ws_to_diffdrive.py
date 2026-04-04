@@ -20,6 +20,7 @@ Polarity (matched from experimental odrive_test.py):
 """
 from __future__ import annotations
 import asyncio
+import argparse
 import json
 import websockets
 import struct
@@ -50,6 +51,24 @@ ODRV1_SERIAL = "335A33633235"
 VEL_MAX      = 4.0    # max turns/s sent to ODrive — tune this
 CMD_TIMEOUT_S = 0.35   # safety timeout: stop if no fresh command arrives
 WATCHDOG_PERIOD_S = 0.05
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="WebSocket differential-drive bridge for dual ODrive controllers."
+    )
+    parser.add_argument(
+        "--max_vel",
+        type=float,
+        default=VEL_MAX,
+        help="Maximum wheel velocity in turns/s (range: 1.0 to 10.0).",
+    )
+    args = parser.parse_args()
+
+    if not (1.0 <= args.max_vel <= 10.0):
+        parser.error("--max_vel must be between 1.0 and 10.0")
+
+    return args
 
 # ─── PROTOCOL ──────────────────────────────────────────────────────
 SOF1 = 0xAA
@@ -107,7 +126,7 @@ def _safe_call(reader):
         return None
 
 
-def build_telemetry(odrv0, odrv1, seq: int) -> dict:
+def build_telemetry(odrv0, odrv1, seq: int, command: dict | None = None) -> dict:
     def axis_payload(axis, name: str) -> dict:
         return {
             "name": name,
@@ -126,6 +145,15 @@ def build_telemetry(odrv0, odrv1, seq: int) -> dict:
         "type": "odrive_telemetry",
         "seq": seq,
         "t_monotonic": time.monotonic(),
+        "command": command or {
+            "seq": seq,
+            "x_i8": None,
+            "z_i8": None,
+            "left_i8": None,
+            "right_i8": None,
+            "left_vel_tps": None,
+            "right_vel_tps": None,
+        },
         "odrv0": {
             "vbus_voltage": _safe_float(getattr(odrv0, "vbus_voltage", None)),
             "axes": {
@@ -288,7 +316,17 @@ def make_handler(odrv0, odrv1):
                     log.info("Command stream restored. Leaving failsafe state.")
                     failsafe_active = False
 
-                telemetry = build_telemetry(odrv0, odrv1, seq)
+                command_info = {
+                    "seq": seq,
+                    "x_i8": x_i8,
+                    "z_i8": z_i8,
+                    "left_i8": left,
+                    "right_i8": right,
+                    "left_vel_tps": left_vel,
+                    "right_vel_tps": right_vel,
+                }
+
+                telemetry = build_telemetry(odrv0, odrv1, seq, command=command_info)
                 await broadcast_telemetry(json.dumps(telemetry))
 
                 log.info(
@@ -321,7 +359,7 @@ async def main():
         log.info("Ready — waiting for drive packets")
         try:
             await asyncio.Future()
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, KeyboardInterrupt):  # ← catch KeyboardInterrupt here too
             pass
         finally:
             watchdog_task.cancel()
@@ -332,8 +370,17 @@ async def main():
 
             log.info("Shutting down — stopping and idling motors")
             stop(odrv0, odrv1)
-            time.sleep(0.2)
+            time.sleep(0.5)       # ← increased from 0.2 to let motors settle
             idle_all(odrv0, odrv1)
+            time.sleep(0.3)       # ← give ODrive USB time to flush before libusb teardown
+
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    cli_args = parse_args()
+    VEL_MAX = cli_args.max_vel
+    log.info(f"Using max velocity: {VEL_MAX:.2f} turns/s")
+
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        log.info("KeyboardInterrupt caught at top level — exited cleanly.")

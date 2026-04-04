@@ -1,0 +1,98 @@
+<?xml version="1.0"?>
+<robot name="rover_visual">
+  <material name="mat_chassis">
+    <color rgba="0.15 0.60 0.95 1.0"/>
+  </material>
+  <material name="mat_wheel">
+    <color rgba="0.08 0.08 0.10 1.0"/>
+  </material>
+  <material name="mat_accent">
+    <color rgba="0.95 0.45 0.20 1.0"/>
+  </material>
+
+  <link name="base_link">
+    <visual>
+      <origin xyz="0 0 0.10" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.65 0.45 0.16"/>
+      </geometry>
+      <material name="mat_chassis"/>
+    </visual>
+  </link>
+
+  <link name="camera_tower">
+    <visual>
+      <origin xyz="0.18 0 0.26" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.09 0.09 0.22"/>
+      </geometry>
+      <material name="mat_accent"/>
+    </visual>
+  </link>
+
+  <joint name="camera_tower_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="camera_tower"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+
+  <link name="wheel_fl">
+    <visual>
+      <origin xyz="0 0 0" rpy="1.57079632679 0 0"/>
+      <geometry>
+        <cylinder radius="0.10" length="0.06"/>
+      </geometry>
+      <material name="mat_wheel"/>
+    </visual>
+  </link>
+  <joint name="wheel_fl_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="wheel_fl"/>
+    <origin xyz="0.25 0.22 0.10" rpy="0 0 0"/>
+  </joint>
+
+  <link name="wheel_rl">
+    <visual>
+      <origin xyz="0 0 0" rpy="1.57079632679 0 0"/>
+      <geometry>
+        <cylinder radius="0.10" length="0.06"/>
+      </geometry>
+      <material name="mat_wheel"/>
+    </visual>
+  </link>
+  <joint name="wheel_rl_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="wheel_rl"/>
+    <origin xyz="-0.25 0.22 0.10" rpy="0 0 0"/>
+  </joint>
+
+  <link name="wheel_fr">
+    <visual>
+      <origin xyz="0 0 0" rpy="1.57079632679 0 0"/>
+      <geometry>
+        <cylinder radius="0.10" length="0.06"/>
+      </geometry>
+      <material name="mat_wheel"/>
+    </visual>
+  </link>
+  <joint name="wheel_fr_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="wheel_fr"/>
+    <origin xyz="0.25 -0.22 0.10" rpy="0 0 0"/>
+  </joint>
+
+  <link name="wheel_rr">
+    <visual>
+      <origin xyz="0 0 0" rpy="1.57079632679 0 0"/>
+      <geometry>
+        <cylinder radius="0.10" length="0.06"/>
+      </geometry>
+      <material name="mat_wheel"/>
+    </visual>
+  </link>
+  <joint name="wheel_rr_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="wheel_rr"/>
+    <origin xyz="-0.25 -0.22 0.10" rpy="0 0 0"/>
+  </joint>
+</robot>

@@ -74,7 +74,7 @@ SERVO_STEP = 2
 SEND_RATE = 0.05
 
 # Match ws_to_diffdrive.py scaling for preview values.
-VEL_MAX_TURNS_PER_S =  4.0
+VEL_MAX_TURNS_PER_S =  5.0
 
 # -- Colour palette -----------------------------------------------------------
 BG = (0, 0, 0)

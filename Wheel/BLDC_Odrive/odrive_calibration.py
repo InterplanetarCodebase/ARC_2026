@@ -190,6 +190,7 @@ def configure(serial, axes):
         axis.motor.config.requested_current_range      = 25
         axis.motor.config.current_control_bandwidth    = 100
         axis.motor.config.torque_constant              = 0.5168750286102295
+        axis.motor.config.current_lim                  = 20.0
 
         # Encoder (Hall-effect)
         axis.encoder.config.mode                = ENCODER_MODE_HALL

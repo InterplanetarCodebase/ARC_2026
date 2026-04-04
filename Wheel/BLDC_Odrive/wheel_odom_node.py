@@ -80,7 +80,7 @@ class WheelOdomNode(Node):
         self.declare_parameter("track_width_m", 0.762)
         self.declare_parameter("right_wheel_sign", -1.0)
         self.declare_parameter("forward_sign", -1.0)
-        self.declare_parameter("publish_rate_hz", 50.0)
+        self.declare_parameter("publish_rate_hz", 100.0)
         self.declare_parameter("ws_reconnect_s", 1.0)
         self.declare_parameter("odom_topic", "wheel_odom")
         self.declare_parameter("pose_topic", "wheel_pose")

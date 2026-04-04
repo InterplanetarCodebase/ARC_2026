@@ -7,6 +7,9 @@
 - **`odrive_calibration.py`** — Erases config, applies motor/encoder settings, runs full calibration (~40s per axis), enables closed-loop velocity control.
 - **`odrive_gui_test.py`** — Interactive keyboard control (W/S/Q) with real-time velocity/position plotting.
 - **`ws_to_diffdrive.py`** — WebSocket server (port 8765) on Jetson Xavier. Receives differential drive packets from GUI, commands ODrive, sends telemetry JSON back.
+- **`wheel_odom_node.py`** — ROS2 node publishing `wheel_odom`, `wheel_pose`, and `odom -> base_link` TF.
+- **`urdf/rover_visual.urdf`** — Lightweight rover visual model for RViz (appearance-focused).
+- **`run_robot_model.sh`** — Starts `robot_state_publisher` with the visual URDF.
 - **`config.txt`** — Reference configuration for manual setup via `odrivetool`.
 
 ## Setup
@@ -33,6 +36,32 @@ python3 odrive_gui_test.py
 ```
 
 Use keyboard: **W** (forward) / **S** (reverse) / **Q** (quit & stop).
+
+## RViz Rover Visualization (URDF)
+
+This is for visual appeal and pose feedback in RViz, not precision geometry.
+
+1. Run odometry TF publisher:
+```bash
+python3 wheel_odom_node.py
+```
+
+2. Run robot model publisher:
+```bash
+bash run_robot_model.sh
+```
+
+3. Start RViz:
+```bash
+rviz2
+```
+
+4. In RViz:
+- Set `Fixed Frame` to `odom`.
+- Add `RobotModel` display.
+- Add `Odometry` display on topic `/wheel_odom` (optional arrow/trail).
+
+The URDF model will move using your existing `odom -> base_link` transform.
 
 ## Motor Config
 
