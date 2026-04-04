@@ -18,7 +18,7 @@ os.environ["SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS"] = "1"
 import pygame
 
 # ── Network ─────────────────────────────────────────────────────────────────
-ROVER_IP   = "192.168.1.2"                   # CHANGE THIS to your rover's IP address
+ROVER_IP   = "127.0.0.1"                   # CHANGE THIS to your rover's IP address
 ROVER_PORT = 5760                            # UDP port for arm commands
 WHEEL_PORT = 5761                            # UDP port for wheel drive commands
 

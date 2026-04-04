@@ -24,12 +24,12 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # ─── CONFIG ───────────────────────────────────────────────────────
-UDP_LISTEN_IP   = "0.0.0.0"
+UDP_LISTEN_IP   = "127.0.0.1"
 UDP_LISTEN_PORT = 5760
 BASE_IP         = None   # Learned from first packet
 BASE_PORT       = None
 
-SERIAL_PORT     = "/dev/ttyUSB0"   # Change to your ESP32 port
+SERIAL_PORT     = "/dev/ttyACM0"   # Change to your ESP32 port
 SERIAL_BAUD     = 921600
 
 WATCHDOG_TIMEOUT = 2.0   # seconds — no UDP → ESTOP ESP32
