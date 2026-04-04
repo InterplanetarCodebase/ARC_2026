@@ -93,7 +93,35 @@ def _safe_float(value):
         return None
 
 
+def _safe_int(value):
+    try:
+        return int(value)
+    except Exception:
+        return None
+
+
+def _safe_call(reader):
+    try:
+        return reader()
+    except Exception:
+        return None
+
+
 def build_telemetry(odrv0, odrv1, seq: int) -> dict:
+    def axis_payload(axis, name: str) -> dict:
+        return {
+            "name": name,
+            "pos_estimate": _safe_float(_safe_call(lambda: axis.encoder.pos_estimate)),
+            "iq_measured": _safe_float(_safe_call(lambda: axis.motor.current_control.Iq_measured)),
+            "id_measured": _safe_float(_safe_call(lambda: axis.motor.current_control.Id_measured)),
+            "ibus": _safe_float(_safe_call(lambda: axis.motor.current_control.Ibus)),
+            "fet_thermistor_temp": _safe_float(_safe_call(lambda: axis.fet_thermistor.temperature)),
+            "axis_error": _safe_int(_safe_call(lambda: axis.error)),
+            "motor_error": _safe_int(_safe_call(lambda: axis.motor.error)),
+            "encoder_error": _safe_int(_safe_call(lambda: axis.encoder.error)),
+            "controller_error": _safe_int(_safe_call(lambda: axis.controller.error)),
+        }
+
     return {
         "type": "odrive_telemetry",
         "seq": seq,
@@ -101,39 +129,15 @@ def build_telemetry(odrv0, odrv1, seq: int) -> dict:
         "odrv0": {
             "vbus_voltage": _safe_float(getattr(odrv0, "vbus_voltage", None)),
             "axes": {
-                "axis0": {
-                    "name": "FL",
-                    "pos_estimate": _safe_float(odrv0.axis0.encoder.pos_estimate),
-                    "iq_measured": _safe_float(odrv0.axis0.motor.current_control.Iq_measured),
-                    "id_measured": _safe_float(odrv0.axis0.motor.current_control.Id_measured),
-                    "ibus": _safe_float(odrv0.axis0.motor.current_control.Ibus),
-                },
-                "axis1": {
-                    "name": "RL",
-                    "pos_estimate": _safe_float(odrv0.axis1.encoder.pos_estimate),
-                    "iq_measured": _safe_float(odrv0.axis1.motor.current_control.Iq_measured),
-                    "id_measured": _safe_float(odrv0.axis1.motor.current_control.Id_measured),
-                    "ibus": _safe_float(odrv0.axis1.motor.current_control.Ibus),
-                },
+                "axis0": axis_payload(odrv0.axis0, "FL"),
+                "axis1": axis_payload(odrv0.axis1, "RL"),
             },
         },
         "odrv1": {
             "vbus_voltage": _safe_float(getattr(odrv1, "vbus_voltage", None)),
             "axes": {
-                "axis0": {
-                    "name": "FR",
-                    "pos_estimate": _safe_float(odrv1.axis0.encoder.pos_estimate),
-                    "iq_measured": _safe_float(odrv1.axis0.motor.current_control.Iq_measured),
-                    "id_measured": _safe_float(odrv1.axis0.motor.current_control.Id_measured),
-                    "ibus": _safe_float(odrv1.axis0.motor.current_control.Ibus),
-                },
-                "axis1": {
-                    "name": "RR",
-                    "pos_estimate": _safe_float(odrv1.axis1.encoder.pos_estimate),
-                    "iq_measured": _safe_float(odrv1.axis1.motor.current_control.Iq_measured),
-                    "id_measured": _safe_float(odrv1.axis1.motor.current_control.Id_measured),
-                    "ibus": _safe_float(odrv1.axis1.motor.current_control.Ibus),
-                },
+                "axis0": axis_payload(odrv1.axis0, "FR"),
+                "axis1": axis_payload(odrv1.axis1, "RR"),
             },
         },
     }
