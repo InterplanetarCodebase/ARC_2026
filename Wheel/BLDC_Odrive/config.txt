@@ -1,4 +1,4 @@
-Configuration File for Odrive 3.6 56V
+Configuration File for Odrive 3.6 56V -- Firmware v0.5.1.post0
 
 odrv0.erase_configuration()
 odrv0.axis0.motor.config.pole_pairs = 15
