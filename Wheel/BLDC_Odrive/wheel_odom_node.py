@@ -80,6 +80,7 @@ class WheelOdomNode(Node):
         self.declare_parameter("track_width_m", 0.762)
         self.declare_parameter("right_wheel_sign", -1.0)
         self.declare_parameter("forward_sign", -1.0)
+        self.declare_parameter("yaw_scale", 0.5)
         self.declare_parameter("publish_rate_hz", 100.0)
         self.declare_parameter("ws_reconnect_s", 1.0)
         self.declare_parameter("odom_topic", "wheel_odom")
@@ -94,6 +95,7 @@ class WheelOdomNode(Node):
         self.track_width_m = float(self.get_parameter("track_width_m").value)
         self.right_wheel_sign = float(self.get_parameter("right_wheel_sign").value)
         self.forward_sign = float(self.get_parameter("forward_sign").value)
+        self.yaw_scale = float(self.get_parameter("yaw_scale").value)
         self.publish_rate_hz = float(self.get_parameter("publish_rate_hz").value)
         self.ws_reconnect_s = float(self.get_parameter("ws_reconnect_s").value)
         self.odom_topic = self.get_parameter("odom_topic").value
@@ -132,7 +134,7 @@ class WheelOdomNode(Node):
         self.timer = self.create_timer(period, self.timer_cb)
 
         self.get_logger().info(
-            f"wheel_odom_node started. odom={self.odom_topic}, pose={self.pose_topic}, ws={self.ws_url}, rate={self.publish_rate_hz:.1f} Hz"
+            f"wheel_odom_node started. odom={self.odom_topic}, pose={self.pose_topic}, ws={self.ws_url}, rate={self.publish_rate_hz:.1f} Hz, yaw_scale={self.yaw_scale:.3f}"
         )
 
     def try_connect(self):
@@ -254,7 +256,8 @@ class WheelOdomNode(Node):
         # d_center = (d_left + d_right) / 2
         # d_yaw = (d_right - d_left) / track_width
         d_center = (d_left + d_right) / 2.0
-        d_yaw = (d_right - d_left) / self.track_width_m
+        d_yaw_raw = (d_right - d_left) / self.track_width_m
+        d_yaw = d_yaw_raw * self.yaw_scale
 
         yaw_mid = self.yaw + (d_yaw * 0.5)
         self.x += d_center * math.cos(yaw_mid)
