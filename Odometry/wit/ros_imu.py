@@ -219,7 +219,7 @@ class BWT901CLNode(Node):
         robot's base_link origin (e.g. mounted 10 cm above: z=0.10).
         """
         st = TransformStamped()
-        st.header.stamp    = self.get_clock().now().to_msg()
+        st.header.stamp    = rclpy.time.Time().to_msg()
         st.header.frame_id = self.base_frame   # 'base_link'
         st.child_frame_id  = self.imu_frame    # 'imu_link'
 
