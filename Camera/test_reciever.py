@@ -78,6 +78,7 @@ class CameraBackend:
         self._fps_ts      = time.monotonic()
         self._last_frame  = None
         self._last_frame_sender_ts_ns = None
+        self._latest_sender_ts_ns = None
         self._frame_lock  = threading.Lock()
         self._latency_lock = threading.Lock()
         self._latency_pts_map = {}
@@ -170,6 +171,10 @@ class CameraBackend:
                     sender_ts_ns = self._latency_pts_map.pop(pts, None)
                 if sender_ts_ns is not None:
                     self._last_frame_sender_ts_ns = sender_ts_ns
+                elif self._latest_sender_ts_ns is not None:
+                    # Fallback for pipelines where decoder/output PTS does not exactly
+                    # match telemetry PTS after depay/parse/decoder stages.
+                    self._last_frame_sender_ts_ns = self._latest_sender_ts_ns
 
         # FPS
         self._frame_count += 1
@@ -235,6 +240,7 @@ class CameraBackend:
 
             with self._latency_lock:
                 self._latency_pts_map[pts] = sender_ts_ns
+                self._latest_sender_ts_ns = sender_ts_ns
                 while len(self._latency_pts_map) > 512:
                     self._latency_pts_map.pop(next(iter(self._latency_pts_map)))
 
@@ -850,7 +856,7 @@ class ReceiverApp(Gtk.Window):
                 "width": self.width,
                 "height": self.height,
                 "fps": 25,
-                "device": f"/dev/video{idx}",
+                "device": "",
                 "port": self.ports[idx] if idx < len(self.ports) else (5000 + idx),
             }
             for idx in range(len(self.ports))
@@ -1011,7 +1017,7 @@ class ReceiverApp(Gtk.Window):
         if not cfg:
             return
         self.settings_enabled.set_active(bool(cfg.get("enabled", True)))
-        self.settings_device.set_text(str(cfg.get("device", f"/dev/video{camera_id}")))
+        self.settings_device.set_text(str(cfg.get("device", "")))
         self.settings_port.set_text(str(cfg.get("port", self.ports[camera_id] if camera_id < len(self.ports) else 5000 + camera_id)))
         self.settings_bitrate.set_text(str(cfg.get("bitrate", 1000000)))
         self.settings_width.set_text(str(cfg.get("width", self.width)))
@@ -1045,15 +1051,19 @@ class ReceiverApp(Gtk.Window):
             except Exception:
                 return default
 
+        device_text = self.settings_device.get_text().strip()
+
         cfg = {
             "enabled": self.settings_enabled.get_active(),
-            "device": self.settings_device.get_text().strip() or f"/dev/video{cam_id}",
             "port": _safe_int(self.settings_port, self.ports[cam_id] if cam_id < len(self.ports) else 5000 + cam_id),
             "bitrate": _safe_int(self.settings_bitrate, 1000000),
             "width": _safe_int(self.settings_width, self.width),
             "height": _safe_int(self.settings_height, self.height),
             "fps": _safe_int(self.settings_fps, 25),
         }
+        # Keep transmitter-side camera mapping unless user explicitly provides a device.
+        if device_text:
+            cfg["device"] = device_text
         self.camera_settings[cam_id] = cfg
 
         payload = {

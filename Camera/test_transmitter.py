@@ -774,6 +774,16 @@ class MultiCameraTransmitter:
 
         s = self.streams[cam_id]
 
+        def _device_in_use_by_other(target_dev):
+            for other in self.streams:
+                if other.camera_id == cam_id:
+                    continue
+                if not getattr(other, "enabled", True):
+                    continue
+                if other.device == target_dev and other.status in ("streaming", "error"):
+                    return other.camera_id
+            return None
+
         def _to_int(v, default):
             try:
                 return int(v)
@@ -784,6 +794,14 @@ class MultiCameraTransmitter:
         enabled = bool(enabled)
 
         device = str(payload.get("device", s.device)).strip() or s.device
+
+        conflict_cam = _device_in_use_by_other(device)
+        if conflict_cam is not None:
+            print(
+                f"[control] CAM {cam_id} rejected: device {device} already in use by CAM {conflict_cam}"
+            )
+            return
+
         port = _to_int(payload.get("port", s.port), s.port)
         if port < 1 or port > 65535:
             port = s.port

@@ -2,7 +2,7 @@
 """
 SENTINEL — GStreamer Multi-Camera GUI Receiver
 Jetson-optimized. Auto-detects decoder.
-Chrome-like tabbed interface with per-feed FPS / ping / port overlay.
+Chrome-like tabbed interface with per-feed FPS / latency / port overlay.
 Click any tile to maximize; ESC or button to return to grid.
 Right-click any feed to add to tabs or pop out into separate windows.
 """
@@ -22,6 +22,11 @@ import subprocess
 import math
 import datetime
 import cairo
+import json
+import socket
+
+
+LATENCY_PORT_OFFSET = 1000
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -50,24 +55,6 @@ def detect_decoder():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Ping helper
-# ══════════════════════════════════════════════════════════════════════════════
-
-def ping_once(host, timeout=1):
-    try:
-        result = subprocess.run(
-            ["ping", "-c", "1", "-W", str(timeout), host],
-            capture_output=True, text=True, timeout=timeout + 1
-        )
-        for line in result.stdout.splitlines():
-            if "time=" in line:
-                return float(line.split("time=")[1].split()[0])
-    except Exception:
-        pass
-    return None
-
-
-# ══════════════════════════════════════════════════════════════════════════════
 #  Camera backend  (GStreamer → appsink → cairo surface)
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -75,6 +62,7 @@ class CameraBackend:
     def __init__(self, camera_id, port, width, height, decoder, host="127.0.0.1"):
         self.camera_id   = camera_id
         self.port        = port
+        self.latency_port = port + LATENCY_PORT_OFFSET
         self.width       = width
         self.height      = height
         self.decoder     = decoder
@@ -83,13 +71,18 @@ class CameraBackend:
         self.pipeline    = None
         self.running     = False
         self.fps         = 0.0
-        self.ping_ms     = None
+        self.latency_ms  = None
         self.status      = "waiting"   # waiting | streaming | error | stopped
 
         self._frame_count = 0
         self._fps_ts      = time.monotonic()
         self._last_frame  = None
+        self._last_frame_sender_ts_ns = None
+        self._latest_sender_ts_ns = None
         self._frame_lock  = threading.Lock()
+        self._latency_lock = threading.Lock()
+        self._latency_pts_map = {}
+        self._latency_sock = None
 
         self._frame_listeners = []
         self._stats_listeners = []
@@ -130,13 +123,19 @@ class CameraBackend:
             self.status = "error"
             return False
         self.running = True
-        threading.Thread(target=self._ping_loop, daemon=True).start()
+        threading.Thread(target=self._latency_loop, daemon=True).start()
         return True
 
     def stop(self):
+        self.running = False
+        if self._latency_sock:
+            try:
+                self._latency_sock.close()
+            except Exception:
+                pass
+            self._latency_sock = None
         if self.pipeline:
             self.pipeline.set_state(Gst.State.NULL)
-        self.running = False
         self.status  = "stopped"
 
     # ── Frame handling ────────────────────────────────────────────────────────
@@ -155,6 +154,7 @@ class CameraBackend:
         if not success:
             return Gst.FlowReturn.OK
 
+        pts = int(buf.pts) if buf.pts != Gst.CLOCK_TIME_NONE else None
         data_copy = bytes(mapinfo.data)
         buf.unmap(mapinfo)
 
@@ -165,6 +165,16 @@ class CameraBackend:
 
         with self._frame_lock:
             self._last_frame = surface
+            if pts is not None:
+                sender_ts_ns = None
+                with self._latency_lock:
+                    sender_ts_ns = self._latency_pts_map.pop(pts, None)
+                if sender_ts_ns is not None:
+                    self._last_frame_sender_ts_ns = sender_ts_ns
+                elif self._latest_sender_ts_ns is not None:
+                    # Fallback for pipelines where decoder/output PTS does not exactly
+                    # match telemetry PTS after depay/parse/decoder stages.
+                    self._last_frame_sender_ts_ns = self._latest_sender_ts_ns
 
         # FPS
         self._frame_count += 1
@@ -187,13 +197,52 @@ class CameraBackend:
         with self._frame_lock:
             return self._last_frame
 
-    # ── Ping ─────────────────────────────────────────────────────────────────
-    def _ping_loop(self):
+    def mark_frame_rendered(self):
+        sender_ts_ns = None
+        with self._frame_lock:
+            sender_ts_ns = self._last_frame_sender_ts_ns
+            self._last_frame_sender_ts_ns = None
+        if sender_ts_ns is None:
+            return
+        self.latency_ms = max(0.0, (time.time_ns() - sender_ts_ns) / 1_000_000.0)
+        for _cb in list(self._stats_listeners):
+            GLib.idle_add(_cb, self.camera_id)
+
+    # ── Latency telemetry ────────────────────────────────────────────────────
+    def _latency_loop(self):
+        if self._latency_sock is None:
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                sock.bind(("0.0.0.0", self.latency_port))
+                sock.settimeout(1.0)
+                self._latency_sock = sock
+            except Exception as e:
+                print(f"[cam{self.camera_id}] Latency socket bind failed on :{self.latency_port}: {e}")
+                return
+
         while self.running:
-            self.ping_ms = ping_once(self.host, timeout=2)
-            for _cb in list(self._stats_listeners):
-                GLib.idle_add(_cb, self.camera_id)
-            time.sleep(3)
+            try:
+                data, _addr = self._latency_sock.recvfrom(4096)
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            except Exception:
+                continue
+
+            try:
+                payload = json.loads(data.decode("utf-8"))
+                pts = int(payload.get("pts"))
+                sender_ts_ns = int(payload.get("sender_ts_ns"))
+            except Exception:
+                continue
+
+            with self._latency_lock:
+                self._latency_pts_map[pts] = sender_ts_ns
+                self._latest_sender_ts_ns = sender_ts_ns
+                while len(self._latency_pts_map) > 512:
+                    self._latency_pts_map.pop(next(iter(self._latency_pts_map)))
 
     # ── Bus ──────────────────────────────────────────────────────────────────
     def _on_bus_message(self, bus, message):
@@ -305,6 +354,7 @@ class CameraTile(Gtk.DrawingArea):
         cr.set_source_surface(frame, 0, 0)
         cr.paint()
         cr.restore()
+        self.backend.mark_frame_rendered()
 
     def _placeholder(self, cr, W, H):
         # Dark grid bg
@@ -444,12 +494,12 @@ class CameraTile(Gtk.DrawingArea):
         cr.move_to(W / 2 - ext.width / 2, ty)
         cr.show_text(fps_str)
 
-        # Ping  (right, colour-coded)
-        if self.backend.ping_ms is not None:
-            ping_str = f"{self.backend.ping_ms:.0f}ms"
-            if self.backend.ping_ms < 30:
+        # End-to-end latency  (right, colour-coded)
+        if self.backend.latency_ms is not None:
+            ping_str = f"{self.backend.latency_ms:.0f}ms"
+            if self.backend.latency_ms < 120:
                 pc = (1.00, 0.55, 0.05)
-            elif self.backend.ping_ms < 80:
+            elif self.backend.latency_ms < 250:
                 pc = (0.92, 0.72, 0.08)
             else:
                 pc = (0.95, 0.22, 0.18)
@@ -788,16 +838,29 @@ menuitem:hover  { background: #1a1200; }
 class ReceiverApp(Gtk.Window):
     COLS = 4
 
-    def __init__(self, ports, width, height, host):
+    def __init__(self, ports, width, height, host, control_port=7000):
         super().__init__(title="INTERPLANETAR  ◈  Multi-Camera Receiver")
         self.ports    = ports
         self.width    = width
         self.height   = height
         self.host     = host
+        self.control_port = control_port
 
         self.backends       = []
         self.tab_pages      = []
         self.popout_windows = []
+        self.camera_settings = {
+            idx: {
+                "enabled": True,
+                "bitrate": 1000000,
+                "width": self.width,
+                "height": self.height,
+                "fps": 25,
+                "device": "",
+                "port": self.ports[idx] if idx < len(self.ports) else (5000 + idx),
+            }
+            for idx in range(len(self.ports))
+        }
 
         Gst.init(None)
         self._apply_css()
@@ -848,6 +911,13 @@ class ReceiverApp(Gtk.Window):
         self.active_badge.set_margin_end(12)
         hdr.pack_start(self.active_badge, False, False, 0)
 
+        self.settings_btn = Gtk.MenuButton(label="Settings")
+        self.settings_btn.set_valign(Gtk.Align.CENTER)
+        self.settings_btn.set_margin_end(8)
+        self.settings_btn.set_relief(Gtk.ReliefStyle.NONE)
+        self.settings_btn.set_popover(self._build_settings_popover())
+        hdr.pack_start(self.settings_btn, False, False, 0)
+
         self.back_btn = Gtk.Button(label="⬡  GRID VIEW")
         self.back_btn.set_name("back-btn")
         self.back_btn.set_valign(Gtk.Align.CENTER)
@@ -884,6 +954,132 @@ class ReceiverApp(Gtk.Window):
         sb.pack_start(self.status_lbl, True,  True,  0)
         sb.pack_end  (self.clock_lbl,  False, False, 0)
         root.pack_end(sb, False, False, 0)
+
+    def _build_settings_popover(self):
+        pop = Gtk.Popover()
+        pop.set_border_width(10)
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+
+        row_cam = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        row_cam.pack_start(Gtk.Label(label="Camera"), False, False, 0)
+        self.settings_camera_combo = Gtk.ComboBoxText()
+        for idx in range(len(self.ports)):
+            self.settings_camera_combo.append_text(f"CAM {idx:02d}")
+        self.settings_camera_combo.set_active(0)
+        self.settings_camera_combo.connect("changed", self._on_settings_camera_changed)
+        row_cam.pack_start(self.settings_camera_combo, True, True, 0)
+        box.pack_start(row_cam, False, False, 0)
+
+        row_enabled = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        row_enabled.pack_start(Gtk.Label(label="Enabled"), False, False, 0)
+        self.settings_enabled = Gtk.Switch()
+        self.settings_enabled.set_active(True)
+        row_enabled.pack_end(self.settings_enabled, False, False, 0)
+        box.pack_start(row_enabled, False, False, 0)
+
+        self.settings_bitrate = Gtk.Entry()
+        self.settings_width = Gtk.Entry()
+        self.settings_height = Gtk.Entry()
+        self.settings_fps = Gtk.Entry()
+        self.settings_device = Gtk.Entry()
+        self.settings_port = Gtk.Entry()
+
+        for label, entry in [
+            ("Device", self.settings_device),
+            ("Port", self.settings_port),
+            ("Bitrate", self.settings_bitrate),
+            ("Width", self.settings_width),
+            ("Height", self.settings_height),
+            ("FPS", self.settings_fps),
+        ]:
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+            row.pack_start(Gtk.Label(label=label), False, False, 0)
+            row.pack_start(entry, True, True, 0)
+            box.pack_start(row, False, False, 0)
+
+        apply_btn = Gtk.Button(label="Apply")
+        apply_btn.connect("clicked", self._apply_camera_settings)
+        box.pack_start(apply_btn, False, False, 0)
+
+        pop.add(box)
+        box.show_all()
+        self._load_settings_to_form(0)
+        return pop
+
+    def _on_settings_camera_changed(self, combo):
+        cam_id = combo.get_active()
+        if cam_id >= 0:
+            self._load_settings_to_form(cam_id)
+
+    def _load_settings_to_form(self, camera_id):
+        cfg = self.camera_settings.get(camera_id)
+        if not cfg:
+            return
+        self.settings_enabled.set_active(bool(cfg.get("enabled", True)))
+        self.settings_device.set_text(str(cfg.get("device", "")))
+        self.settings_port.set_text(str(cfg.get("port", self.ports[camera_id] if camera_id < len(self.ports) else 5000 + camera_id)))
+        self.settings_bitrate.set_text(str(cfg.get("bitrate", 1000000)))
+        self.settings_width.set_text(str(cfg.get("width", self.width)))
+        self.settings_height.set_text(str(cfg.get("height", self.height)))
+        self.settings_fps.set_text(str(cfg.get("fps", 25)))
+
+    def _apply_local_receiver_camera(self, camera_id, enabled, port):
+        """Reconfigure local receive pipeline to follow transmitter-side changes."""
+        if camera_id < 0 or camera_id >= len(self.backends):
+            return
+
+        be = self.backends[camera_id]
+        be.stop()
+        be.port = port
+        be.latency_port = port + LATENCY_PORT_OFFSET
+        if enabled:
+            if be.build() and be.start():
+                if camera_id < len(self.ports):
+                    self.ports[camera_id] = port
+            else:
+                be.status = "error"
+
+    def _apply_camera_settings(self, _btn):
+        cam_id = self.settings_camera_combo.get_active()
+        if cam_id < 0:
+            return
+
+        def _safe_int(entry, default):
+            try:
+                return int(entry.get_text().strip())
+            except Exception:
+                return default
+
+        device_text = self.settings_device.get_text().strip()
+
+        cfg = {
+            "enabled": self.settings_enabled.get_active(),
+            "port": _safe_int(self.settings_port, self.ports[cam_id] if cam_id < len(self.ports) else 5000 + cam_id),
+            "bitrate": _safe_int(self.settings_bitrate, 1000000),
+            "width": _safe_int(self.settings_width, self.width),
+            "height": _safe_int(self.settings_height, self.height),
+            "fps": _safe_int(self.settings_fps, 25),
+        }
+        # Keep transmitter-side camera mapping unless user explicitly provides a device.
+        if device_text:
+            cfg["device"] = device_text
+        self.camera_settings[cam_id] = cfg
+
+        payload = {
+            "command": "set_camera",
+            "camera_id": cam_id,
+            **cfg,
+        }
+
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.sendto(json.dumps(payload).encode("utf-8"), (self.host, self.control_port))
+            sock.close()
+            self._apply_local_receiver_camera(cam_id, cfg["enabled"], cfg["port"])
+            self.status_lbl.set_text(f"SETTINGS SENT  ─  CAM {cam_id:02d}")
+        except Exception as e:
+            self.status_lbl.set_text(f"SETTINGS SEND FAILED  ─  CAM {cam_id:02d}  ─  {e}")
 
     def _build_camera_widget(self, camera_id, is_large=False):
         """Create a camera tile with a small snapshot button overlay."""
@@ -1183,7 +1379,30 @@ def signal_handler(sig, frame):
     sys.exit(0)
 
 
+def print_receiver_startup_config(args, default_camera_count, default_base_port):
+    """Print launch/default configuration for easier debugging at startup."""
+    print("\n" + "=" * 70)
+    print("RECEIVER STARTUP CONFIG")
+    print("=" * 70)
+    print(f"Effective host         : {args.host}")
+    print(f"Effective control port : {args.control_port}")
+    print(f"Effective resolution   : {args.width}x{args.height}")
+    print(f"Effective ports ({len(args.ports)}): {args.ports}")
+    print("-" * 70)
+    print(f"Default camera count   : {default_camera_count}")
+    print(f"Default base port      : {default_base_port}")
+    print(f"Default ports          : {[default_base_port + i for i in range(default_camera_count)]}")
+    print(f"Latency UDP offset     : +{LATENCY_PORT_OFFSET} (per cam telemetry)")
+    print("Latency note           : accurate one-way latency needs clock sync (NTP/PTP)")
+    print("Default settings/cam   : bitrate=1000000, fps=25")
+    print("=" * 70 + "\n")
+
+
 def main():
+    default_camera_count = 8
+    default_base_port = 5000
+    default_ports = [default_base_port + idx for idx in range(default_camera_count)]
+
     parser = argparse.ArgumentParser(
         description="SENTINEL — Multi-Camera GUI Receiver (Jetson)",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -1199,16 +1418,20 @@ Example usage:
     python3 camera_receiver.py -p 5000 5001 -i 192.168.1.50 -w 1280 -H 720
         """
     )
-    parser.add_argument("-p", "--ports", nargs="+", type=int, default=[5000],
+    parser.add_argument("-p", "--ports", nargs="+", type=int, default=default_ports,
                         metavar="PORT",
                         help="UDP port(s). E.g: -p 5000 5001 5002 5003")
-    parser.add_argument("-w", "--width",  type=int, default=640,
+    parser.add_argument("-w", "--width",  type=int, default=1920,
                         help="Decode width per feed")
-    parser.add_argument("-H", "--height", type=int, default=480,
+    parser.add_argument("-H", "--height", type=int, default=1080,
                         help="Decode height per feed")
     parser.add_argument("-i", "--host",   type=str, default="127.0.0.1",
-                        help="Transmitter IP (used for ping measurement)")
+                        help="Transmitter IP (used for control and latency telemetry source)")
+    parser.add_argument("--control-port", type=int, default=7000,
+                        help="UDP control port used by transmitter settings channel")
     args = parser.parse_args()
+
+    print_receiver_startup_config(args, default_camera_count, default_base_port)
 
     signal.signal(signal.SIGINT, signal_handler)
 
@@ -1217,6 +1440,7 @@ Example usage:
         width=args.width,
         height=args.height,
         host=args.host,
+        control_port=args.control_port,
     )
     Gtk.main()
 

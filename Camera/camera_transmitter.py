@@ -27,6 +27,8 @@ import os
 import time
 import subprocess
 import re
+import json
+import socket
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -74,6 +76,8 @@ IO_MODE_CANDIDATES = [
     (4, "dmabuf-import"),
     (2, "userptr"),
 ]
+
+LATENCY_PORT_OFFSET = 1000
 
 
 def detect_encoder():
@@ -337,6 +341,7 @@ class CameraStream:
         self.device        = device
         self.host          = host
         self.port          = port
+        self.latency_port  = port + LATENCY_PORT_OFFSET
         self.encoder       = encoder
         self.bitrate       = bitrate
         self.io_mode       = io_mode
@@ -359,6 +364,9 @@ class CameraStream:
         self._last_error_was_bp = False
         self._gave_up_logged    = False
         self._lock              = threading.Lock()
+        self.enabled            = True
+        self._pending_control_apply = False
+        self._latency_sock      = None
 
     def _build_profiles(self, w, h, fps):
         """
@@ -406,7 +414,8 @@ class CameraStream:
                 f"image/jpeg,width={self.width},height={self.height},"
                 f"framerate={self.fps}/1 ! "
                 f"jpegdec ! "
-                f"videoconvert"
+                f"videoconvert ! "
+                f"identity name=latency_tap signal-handoffs=true"
             )
         else:
             # Raw format (YUYV, YUY2, NV12, etc.)
@@ -416,7 +425,8 @@ class CameraStream:
                 f"video/x-raw,format={fmt},"
                 f"width={self.width},height={self.height},"
                 f"framerate={self.fps}/1 ! "
-                f"videoconvert"
+                f"videoconvert ! "
+                f"identity name=latency_tap signal-handoffs=true"
             )
 
     def build(self):
@@ -446,6 +456,10 @@ class CameraStream:
         bus = self.pipeline.get_bus()
         bus.add_signal_watch()
         bus.connect("message", self._on_message)
+
+        latency_tap = self.pipeline.get_by_name("latency_tap")
+        if latency_tap:
+            latency_tap.connect("handoff", self._on_latency_handoff)
         return True
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -473,6 +487,12 @@ class CameraStream:
         with self._lock:
             self._do_stop()
             self.status = "stopped"
+        if self._latency_sock:
+            try:
+                self._latency_sock.close()
+            except Exception:
+                pass
+            self._latency_sock = None
         print(f"[cam{self.camera_id}] Stopped")
 
     def _do_stop(self):
@@ -483,6 +503,30 @@ class CameraStream:
 
     def is_device_present(self):
         return os.path.exists(self.device)
+
+    def _emit_latency_telemetry(self, pts):
+        if pts is None or pts == Gst.CLOCK_TIME_NONE:
+            return
+        if self._latency_sock is None:
+            try:
+                self._latency_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            except Exception:
+                return
+        payload = {
+            "camera_id": self.camera_id,
+            "pts": int(pts),
+            "sender_ts_ns": time.time_ns(),
+        }
+        try:
+            self._latency_sock.sendto(
+                json.dumps(payload, separators=(",", ":")).encode("utf-8"),
+                (self.host, self.latency_port),
+            )
+        except Exception:
+            pass
+
+    def _on_latency_handoff(self, _identity, buffer, *_args):
+        self._emit_latency_telemetry(buffer.pts)
 
     # ── Bus messages ──────────────────────────────────────────────────────────
 
@@ -512,13 +556,20 @@ class CameraStream:
                 print(f"[cam{self.camera_id}] Debug: {debug_str[:300]}")
 
             with self._lock:
-                self._error_count      += 1
-                # Treat negotiation errors same as buffer pool — lower profile
-                self._last_error_was_bp = bp_err or neg_err
-                if bp_err or neg_err:
-                    self._usb_errors += 1
-                self._do_stop()
-                self.status = "error"
+                # If this failure happened right after a control apply, do not arm auto-restart.
+                if self._pending_control_apply:
+                    self._do_stop()
+                    self.status = "stopped"
+                    self._pending_control_apply = False
+                    print(f"[cam{self.camera_id}] Control apply failed; auto-retry suppressed")
+                else:
+                    self._error_count      += 1
+                    # Treat negotiation errors same as buffer pool — lower profile
+                    self._last_error_was_bp = bp_err or neg_err
+                    if bp_err or neg_err:
+                        self._usb_errors += 1
+                    self._do_stop()
+                    self.status = "error"
 
         elif t == Gst.MessageType.WARNING:
             warn, _ = message.parse_warning()
@@ -532,6 +583,7 @@ class CameraStream:
                 if new == Gst.State.PLAYING:
                     with self._lock:
                         self.status = "streaming"
+                        self._pending_control_apply = False
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -544,11 +596,12 @@ class MultiCameraTransmitter:
     RESTART_DELAY    = 3
     STAGGER_DELAY    = 1.5
 
-    def __init__(self, cameras, host, base_port, width, height, fps, bitrate):
+    def __init__(self, cameras, host, base_port, width, height, fps, bitrate, control_port=7000):
         Gst.init(None)
         self.cameras   = cameras
         self.host      = host
         self.base_port = base_port
+        self.control_port = control_port
         self.width     = width
         self.height    = height
         self.fps       = fps
@@ -557,6 +610,31 @@ class MultiCameraTransmitter:
         self.streams   = []
         self.loop      = None
         self._running  = False
+        self._ctl_sock = None
+
+    def _ensure_stream_slot(self, cam_id):
+        """Create placeholder streams up to cam_id so control can manage them."""
+        while len(self.streams) <= cam_id:
+            idx = len(self.streams)
+            stream = CameraStream(
+                idx,
+                f"/dev/video{idx}",
+                self.width,
+                self.height,
+                self.fps,
+                self.bitrate,
+                self.host,
+                self.base_port + idx,
+                self.encoder,
+                io_mode=0,
+                native_format="YUYV",
+                max_w=self.width,
+                max_h=self.height,
+            )
+            stream.status = "stopped"
+            stream.enabled = False
+            self.streams.append(stream)
+            print(f"[control] Created CAM slot {idx} (default device {stream.device})")
 
     def setup(self):
         self.encoder = detect_encoder()
@@ -617,6 +695,10 @@ class MultiCameraTransmitter:
             target=self._monitor_loop, daemon=True, name="cam-monitor"
         ).start()
 
+        threading.Thread(
+            target=self._control_loop, daemon=True, name="cam-control"
+        ).start()
+
         self.loop = GLib.MainLoop()
         try:
             self.loop.run()
@@ -628,12 +710,178 @@ class MultiCameraTransmitter:
     def stop(self):
         print("Stopping all streams...")
         self._running = False
+        if self._ctl_sock:
+            try:
+                self._ctl_sock.close()
+            except Exception:
+                pass
+            self._ctl_sock = None
         for s in self.streams:
             if s.status not in ("stopped", "idle"):
                 s.stop()
         if self.loop and self.loop.is_running():
             self.loop.quit()
         print("All streams stopped.")
+
+    def _control_loop(self):
+        """Receive runtime control commands from receiver over UDP/JSON."""
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.bind(("0.0.0.0", self.control_port))
+            sock.settimeout(1.0)
+            self._ctl_sock = sock
+            print(f"[control] Listening on UDP 0.0.0.0:{self.control_port}")
+        except Exception as e:
+            print(f"[control] Failed to bind control socket: {e}")
+            return
+
+        while self._running:
+            try:
+                data, _addr = sock.recvfrom(8192)
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            except Exception:
+                continue
+
+            try:
+                payload = json.loads(data.decode("utf-8"))
+            except Exception:
+                print("[control] Ignoring malformed JSON packet")
+                continue
+
+            if payload.get("command") != "set_camera":
+                continue
+
+            self._apply_camera_settings(payload)
+
+        print("[control] Stopped")
+
+    def _apply_camera_settings(self, payload):
+        """Apply per-camera settings and restart stream if needed."""
+        try:
+            cam_id = int(payload.get("camera_id"))
+        except Exception:
+            print("[control] Missing/invalid camera_id")
+            return
+
+        if cam_id < 0:
+            print(f"[control] camera_id out of range: {cam_id}")
+            return
+
+        self._ensure_stream_slot(cam_id)
+
+        s = self.streams[cam_id]
+
+        def _device_in_use_by_other(target_dev):
+            for other in self.streams:
+                if other.camera_id == cam_id:
+                    continue
+                if not getattr(other, "enabled", True):
+                    continue
+                if other.device == target_dev and other.status in ("streaming", "error"):
+                    return other.camera_id
+            return None
+
+        def _to_int(v, default):
+            try:
+                return int(v)
+            except Exception:
+                return default
+
+        enabled = payload.get("enabled", s.enabled)
+        enabled = bool(enabled)
+
+        device = str(payload.get("device", s.device)).strip() or s.device
+
+        conflict_cam = _device_in_use_by_other(device)
+        if conflict_cam is not None:
+            print(
+                f"[control] CAM {cam_id} rejected: device {device} already in use by CAM {conflict_cam}"
+            )
+            return
+
+        port = _to_int(payload.get("port", s.port), s.port)
+        if port < 1 or port > 65535:
+            port = s.port
+
+        bitrate = max(100000, _to_int(payload.get("bitrate", s.bitrate), s.bitrate))
+        width = max(64, _to_int(payload.get("width", s.width), s.width))
+        height = max(64, _to_int(payload.get("height", s.height), s.height))
+        fps = max(1, _to_int(payload.get("fps", s.fps), s.fps))
+
+        # Always probe source format/io-mode for present devices.
+        # This avoids stale defaults (e.g., YUYV) on newly created dynamic slots.
+        if os.path.exists(device):
+            native_fmt = probe_native_format(device) or "YUYV"
+            io_mode = probe_best_io_mode(device, native_fmt)
+        else:
+            native_fmt = s.native_format
+            io_mode = s.io_mode
+
+        # Snap control-requested mode to a supported camera mode to avoid not-negotiated loops.
+        if os.path.exists(device):
+            caps = probe_v4l2_caps(device)
+            if caps:
+                if (width, height, fps) not in caps:
+                    candidates = [c for c in caps if c[0] <= width and c[1] <= height and c[2] <= fps]
+                    if not candidates:
+                        candidates = [c for c in caps if c[0] <= width and c[1] <= height]
+                    if not candidates:
+                        candidates = [c for c in caps if c[0] == width and c[1] == height]
+                    chosen = candidates[0] if candidates else caps[0]
+                    width, height, fps = chosen
+                    print(
+                        f"[control] CAM {cam_id} requested unsupported mode; "
+                        f"using {width}x{height}@{fps}"
+                    )
+
+        with s._lock:
+            if s.running:
+                s._do_stop()
+
+            s.enabled = enabled
+            s.device = device
+            s.port = port
+            s.latency_port = port + LATENCY_PORT_OFFSET
+            s.native_format = native_fmt
+            s.io_mode = io_mode
+            s.bitrate = bitrate
+            s.width = width
+            s.height = height
+            s.fps = fps
+            s._max_w = width
+            s._max_h = height
+            s._profiles = s._build_profiles(width, height, fps)
+            s._profile_idx = 0
+            s._error_count = 0
+            s._last_error_was_bp = False
+            s._gave_up_logged = False
+            s._pending_control_apply = enabled
+
+            if not enabled:
+                s.status = "stopped"
+                print(f"[control] CAM {cam_id} disabled")
+                return
+
+            if not s.is_device_present():
+                # Control-command path: do not arm auto-recovery; wait for next explicit command.
+                s.status = "stopped"
+                print(f"[control] CAM {cam_id} enabled but device missing ({s.device})")
+                return
+
+        # Build/start outside stream lock to avoid deadlock (start() acquires s._lock).
+        if s.build() and s.start():
+            print(
+                f"[control] CAM {cam_id} applied: "
+                f"{s.device} port={s.port} {s.width}x{s.height}@{s.fps} bitrate={s.bitrate}"
+            )
+        else:
+            with s._lock:
+                # Control-command failure should not trigger monitor auto-reconnect loops.
+                s.status = "stopped"
+            print(f"[control] CAM {cam_id} apply failed")
 
     def _monitor_loop(self):
         print("[monitor] Started — watching for disconnects and errors")
@@ -658,6 +906,7 @@ class MultiCameraTransmitter:
                 s for s in self.streams
                 if s.status == "error"
                 and s._error_count < CameraStream.MAX_ERRORS
+                and s.enabled
                 and s.is_device_present()
             ]
 
@@ -727,6 +976,28 @@ def signal_handler(sig, frame):
     sys.exit(0)
 
 
+def print_transmitter_startup_config(args):
+    """Print launch/default configuration for easier debugging at startup."""
+    print("\n" + "=" * 70)
+    print("TRANSMITTER STARTUP CONFIG")
+    print("=" * 70)
+    print(f"Effective host         : {args.host}")
+    print(f"Effective control port : {args.control_port}")
+    print(f"Effective base port    : {args.base_port}")
+    print(f"Effective resolution   : {args.width}x{args.height}")
+    print(f"Effective fps          : {args.fps}")
+    print(f"Effective bitrate      : {args.bitrate}")
+    print(f"Effective stagger      : {args.stagger}")
+    print(f"Skip probe             : {args.skip_probe}")
+    print(f"Cameras argument       : {args.cameras if args.cameras else '[] (dynamic via receiver settings)'}")
+    print("-" * 70)
+    print("Default startup profile: base-port=5000, width=640, height=480, fps=25, bitrate=1000000")
+    print("Control channel default: port=7000")
+    print(f"Latency UDP offset     : +{LATENCY_PORT_OFFSET} (per cam telemetry)")
+    print("Latency note           : accurate one-way latency needs clock sync (NTP/PTP)")
+    print("=" * 70 + "\n")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="GStreamer Multi-Camera Transmitter — RPi4",
@@ -739,27 +1010,30 @@ Example usage:
   Multiple cameras:
     python3 camera_transmitter.py -c /dev/video0 /dev/video2 /dev/video4 -i 192.168.1.100 -p 5000
   
-  Custom resolution and framerate:
-    python3 camera_transmitter.py -c /dev/video0 -i 192.168.1.100 -p 5000 -w 1280 -H 720 -f 30
+    Custom resolution and framerate:
+        python3 camera_transmitter.py -c /dev/video0 -i 192.168.1.100 -p 5000 -w 1280 -H 720 -f 25
         """
     )
-    parser.add_argument("-c", "--cameras", nargs="+", default=["/dev/video0"],
+    parser.add_argument("-c", "--cameras", nargs="*", default=[],
                         metavar="DEVICE",
-                        help="Camera devices: -c /dev/video0 /dev/video2 /dev/video4")
+                        help="Optional camera devices. If omitted, cameras can be started from receiver settings.")
     parser.add_argument("-i", "--host", required=True,
                         help="Receiver IP address")
     parser.add_argument("-p", "--base-port", type=int, default=5000)
     parser.add_argument("-w", "--width",   type=int, default=640)
     parser.add_argument("-H", "--height",  type=int, default=480)
-    parser.add_argument("-f", "--fps",     type=int, default=30)
-    parser.add_argument("-b", "--bitrate", type=int, default=800000,
+    parser.add_argument("-f", "--fps",     type=int, default=25)
+    parser.add_argument("-b", "--bitrate", type=int, default=1000000,
                         help="Target bitrate in bits/s (lower for long-range links)")
     parser.add_argument("--stagger", type=float, default=1.5,
                         help="Seconds between pipeline starts")
     parser.add_argument("--skip-probe", action="store_true",
                         help="Skip probing, use mmap+YUYV for all cameras")
+    parser.add_argument("--control-port", type=int, default=7000,
+                        help="UDP control port for runtime camera settings")
 
     args = parser.parse_args()
+    print_transmitter_startup_config(args)
     signal.signal(signal.SIGINT, signal_handler)
 
     MultiCameraTransmitter.STAGGER_DELAY = args.stagger
@@ -778,6 +1052,7 @@ Example usage:
         height=args.height,
         fps=args.fps,
         bitrate=args.bitrate,
+        control_port=args.control_port,
     )
     tx.start()
 
