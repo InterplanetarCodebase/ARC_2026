@@ -8,3 +8,9 @@ psutil
 nvidia-ml-py3
 PyGObject
 pycairo
+websockets
+pyqtgraph
+PyQt5
+odrive==0.5.1.post0
+Pillow
+pyzbar
