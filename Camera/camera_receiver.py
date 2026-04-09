@@ -59,10 +59,15 @@ def detect_decoder():
 # ══════════════════════════════════════════════════════════════════════════════
 
 class CameraBackend:
-    def __init__(self, camera_id, port, width, height, decoder, host="127.0.0.1"):
+    def __init__(self, camera_id, port, width, height, decoder, host="127.0.0.1", source_type="udp", rtsp_url=None, latency_port=None):
         self.camera_id   = camera_id
-        self.port        = port
-        self.latency_port = port + LATENCY_PORT_OFFSET
+        self.source_type = source_type
+        self.rtsp_url    = rtsp_url
+        self.port        = port if source_type == "udp" else None
+        if latency_port is not None:
+            self.latency_port = latency_port
+        else:
+            self.latency_port = (port + LATENCY_PORT_OFFSET) if source_type == "udp" and port is not None else None
         self.width       = width
         self.height      = height
         self.decoder     = decoder
@@ -89,18 +94,32 @@ class CameraBackend:
 
     # ── Build pipeline ────────────────────────────────────────────────────────
     def build(self):
-        pipeline_str = (
-            f"udpsrc port={self.port} buffer-size=2097152 "
-            f"caps=\"application/x-rtp,media=video,clock-rate=90000,"
-            f"encoding-name=H264,payload=96\" ! "
-            f"rtpjitterbuffer latency=100 drop-on-latency=true ! "
-            f"rtph264depay ! h264parse ! "
-            f"{self.decoder['pipeline']} ! "
-            f"videoscale ! videoconvert ! "
-            f"video/x-raw,format=BGRx,width={self.width},height={self.height} ! "
-            f"appsink name=sink emit-signals=true max-buffers=2 drop=true sync=false"
-        )
-        print(f"[cam{self.camera_id}] {pipeline_str}")
+        if self.source_type == "rtsp":
+            if not self.rtsp_url:
+                print(f"[cam{self.camera_id}] RTSP URL missing")
+                self.status = "error"
+                return False
+            pipeline_str = (
+                f"uridecodebin uri=\"{self.rtsp_url}\" "
+                f"source::latency=120 source::protocols=tcp name=src "
+                f"src. ! queue ! "
+                f"videoscale ! videoconvert ! "
+                f"video/x-raw,format=BGRx,width={self.width},height={self.height} ! "
+                f"appsink name=sink emit-signals=true max-buffers=2 drop=true sync=false"
+            )
+        else:
+            pipeline_str = (
+                f"udpsrc port={self.port} buffer-size=2097152 "
+                f"caps=\"application/x-rtp,media=video,clock-rate=90000,"
+                f"encoding-name=H264,payload=96\" ! "
+                f"rtpjitterbuffer latency=100 drop-on-latency=true ! "
+                f"rtph264depay ! h264parse ! "
+                f"{self.decoder['pipeline']} ! "
+                f"videoscale ! videoconvert ! "
+                f"video/x-raw,format=BGRx,width={self.width},height={self.height} ! "
+                f"appsink name=sink emit-signals=true max-buffers=2 drop=true sync=false"
+            )
+        print(f"[cam{self.camera_id}|{self.source_type}] {pipeline_str}")
         try:
             self.pipeline = Gst.parse_launch(pipeline_str)
         except GLib.Error as e:
@@ -123,7 +142,8 @@ class CameraBackend:
             self.status = "error"
             return False
         self.running = True
-        threading.Thread(target=self._latency_loop, daemon=True).start()
+        if self.latency_port is not None:
+            threading.Thread(target=self._latency_loop, daemon=True).start()
         return True
 
     def stop(self):
@@ -208,8 +228,20 @@ class CameraBackend:
         for _cb in list(self._stats_listeners):
             GLib.idle_add(_cb, self.camera_id)
 
+    def source_badge(self):
+        if self.source_type == "rtsp":
+            return "RTSP"
+        return f":{self.port}"
+
+    def source_status(self):
+        if self.source_type == "rtsp":
+            return "RTSP"
+        return f"PORT {self.port}"
+
     # ── Latency telemetry ────────────────────────────────────────────────────
     def _latency_loop(self):
+        if self.latency_port is None:
+            return
         if self._latency_sock is None:
             try:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -233,13 +265,17 @@ class CameraBackend:
 
             try:
                 payload = json.loads(data.decode("utf-8"))
-                pts = int(payload.get("pts"))
+                pts_raw = payload.get("pts")
+                pts = int(pts_raw) if pts_raw is not None else None
                 sender_ts_ns = int(payload.get("sender_ts_ns"))
             except Exception:
                 continue
 
             with self._latency_lock:
-                self._latency_pts_map[pts] = sender_ts_ns
+                # If sender provides PTS, we can do exact frame-to-telemetry matching.
+                # If it doesn't (common for RTSP side-channel), we fallback to latest ts.
+                if pts is not None:
+                    self._latency_pts_map[pts] = sender_ts_ns
                 self._latest_sender_ts_ns = sender_ts_ns
                 while len(self._latency_pts_map) > 512:
                     self._latency_pts_map.pop(next(iter(self._latency_pts_map)))
@@ -476,10 +512,10 @@ class CameraTile(Gtk.DrawingArea):
         cr.set_font_size(fs)
         ty = H - bh / 2 + fs / 2
 
-        # Port  (left, orange)
+        # Source  (left, orange)
         cr.set_source_rgba(1.00, 0.55, 0.05, 0.95)
         cr.move_to(pad, ty)
-        cr.show_text(f":{self.backend.port}")
+        cr.show_text(self.backend.source_badge())
 
         # FPS  (centre, colour-coded — orange-hi / amber-mid / red-low)
         fps_str = f"{self.backend.fps:.1f} FPS"
@@ -723,8 +759,9 @@ class TabPage(Gtk.Box):
 
         self.stack.set_visible_child_name("max")
         self.app.back_btn.show()
+        be = self.app.backends[camera_id]
         self.app.status_lbl.set_text(
-            f"MAXIMIZED  ─  CAM {camera_id:02d}  ─  PORT {self.app.ports[camera_id]}"
+            f"MAXIMIZED  ─  CAM {camera_id:02d}  ─  {be.source_status()}"
             f"   [ESC or GRID VIEW to return]"
         )
 
@@ -768,7 +805,7 @@ class PopOutWindow(Gtk.Window):
 
     def __init__(self, app, camera_id):
         be = app.backends[camera_id]
-        super().__init__(title=f"CAM {camera_id:02d}  ─  :{be.port}")
+        super().__init__(title=f"CAM {camera_id:02d}  ─  {be.source_badge()}")
         self.app       = app
         self.camera_id = camera_id
 
@@ -838,13 +875,16 @@ menuitem:hover  { background: #1a1200; }
 class ReceiverApp(Gtk.Window):
     COLS = 4
 
-    def __init__(self, ports, width, height, host, control_port=7000):
+    def __init__(self, ports, width, height, host, control_port=7000, rtsp_urls=None, rtsp_latency_ports=None):
         super().__init__(title="INTERPLANETAR  ◈  Multi-Camera Receiver")
         self.ports    = ports
         self.width    = width
         self.height   = height
         self.host     = host
         self.control_port = control_port
+        self.rtsp_urls = list(rtsp_urls) if rtsp_urls else []
+        self.rtsp_latency_ports = list(rtsp_latency_ports) if rtsp_latency_ports else []
+        self.total_feed_target = len(self.ports) + len(self.rtsp_urls)
 
         self.backends       = []
         self.tab_pages      = []
@@ -905,7 +945,7 @@ class ReceiverApp(Gtk.Window):
         hdr.pack_start(left, False, False, 0)
         hdr.pack_start(Gtk.Box(), True, True, 0)  # spacer
 
-        self.active_badge = Gtk.Label(label=f"0 / {len(self.ports)} ACTIVE")
+        self.active_badge = Gtk.Label(label=f"0 / {self.total_feed_target} ACTIVE")
         self.active_badge.set_name("active-badge")
         self.active_badge.set_valign(Gtk.Align.CENTER)
         self.active_badge.set_margin_end(12)
@@ -1030,6 +1070,8 @@ class ReceiverApp(Gtk.Window):
             return
 
         be = self.backends[camera_id]
+        if be.source_type != "udp":
+            return
         be.stop()
         be.port = port
         be.latency_port = port + LATENCY_PORT_OFFSET
@@ -1132,18 +1174,38 @@ class ReceiverApp(Gtk.Window):
 
         all_ids = []
         for idx, port in enumerate(self.ports):
-            be = CameraBackend(idx, port, self.width, self.height, decoder, self.host)
+            be = CameraBackend(idx, port, self.width, self.height, decoder, self.host, source_type="udp")
             if not be.build():
                 continue
             self.backends.append(be)
             all_ids.append(idx)
             be.start()
 
+        for rtsp_idx, rtsp_url in enumerate(self.rtsp_urls):
+            cam_id = len(self.backends)
+            rtsp_latency_port = self.rtsp_latency_ports[rtsp_idx] if rtsp_idx < len(self.rtsp_latency_ports) else None
+            be = CameraBackend(
+                cam_id,
+                None,
+                self.width,
+                self.height,
+                decoder,
+                self.host,
+                source_type="rtsp",
+                rtsp_url=rtsp_url,
+                latency_port=rtsp_latency_port,
+            )
+            if not be.build():
+                continue
+            self.backends.append(be)
+            all_ids.append(cam_id)
+            be.start()
+
         # Default "All Cameras" tab
         self._add_tab("All Cameras", all_ids, is_main=True, closeable=False)
 
         self.status_lbl.set_text(
-            f"SYSTEM ONLINE  ─  {len(self.backends)} PIPELINE(S) ACTIVE  ─  "
+            f"SYSTEM ONLINE  ─  {len(self.backends)} FEED(S) ACTIVE  ─  "
             f"Right-click any feed to manage tabs"
         )
 
@@ -1349,7 +1411,8 @@ class ReceiverApp(Gtk.Window):
     # ── Tick ─────────────────────────────────────────────────────────────────
     def _tick(self):
         active = sum(1 for b in self.backends if b.status == "streaming")
-        self.active_badge.set_text(f"{active} / {len(self.ports)} ACTIVE")
+        total = len(self.backends) if self.backends else self.total_feed_target
+        self.active_badge.set_text(f"{active} / {total} ACTIVE")
         self.clock_lbl.set_text(datetime.datetime.now().strftime("%Y-%m-%d  %H:%M:%S"))
         return True
 
@@ -1379,7 +1442,7 @@ def signal_handler(sig, frame):
     sys.exit(0)
 
 
-def print_receiver_startup_config(args, default_camera_count, default_base_port):
+def print_receiver_startup_config(args, default_camera_count, default_base_port, default_rtsp_urls, default_rtsp_latency_ports):
     """Print launch/default configuration for easier debugging at startup."""
     print("\n" + "=" * 70)
     print("RECEIVER STARTUP CONFIG")
@@ -1388,10 +1451,14 @@ def print_receiver_startup_config(args, default_camera_count, default_base_port)
     print(f"Effective control port : {args.control_port}")
     print(f"Effective resolution   : {args.width}x{args.height}")
     print(f"Effective ports ({len(args.ports)}): {args.ports}")
+    print(f"Effective RTSP ({len(args.rtsp)}): {args.rtsp}")
+    print(f"Effective RTSP latency ports ({len(args.rtsp_latency_ports)}): {args.rtsp_latency_ports}")
     print("-" * 70)
     print(f"Default camera count   : {default_camera_count}")
     print(f"Default base port      : {default_base_port}")
     print(f"Default ports          : {[default_base_port + i for i in range(default_camera_count)]}")
+    print(f"Default RTSP           : {default_rtsp_urls}")
+    print(f"Default RTSP latency   : {default_rtsp_latency_ports}")
     print(f"Latency UDP offset     : +{LATENCY_PORT_OFFSET} (per cam telemetry)")
     print("Latency note           : accurate one-way latency needs clock sync (NTP/PTP)")
     print("Default settings/cam   : bitrate=1000000, fps=25")
@@ -1402,6 +1469,10 @@ def main():
     default_camera_count = 8
     default_base_port = 5000
     default_ports = [default_base_port + idx for idx in range(default_camera_count)]
+    default_rtsp_urls = [
+        "rtsp://admin:Interplanetar123@192.168.1.141:554/live/0/SUB",
+    ]
+    default_rtsp_latency_ports = []
 
     parser = argparse.ArgumentParser(
         description="SENTINEL — Multi-Camera GUI Receiver (Jetson)",
@@ -1429,9 +1500,15 @@ Example usage:
                         help="Transmitter IP (used for control and latency telemetry source)")
     parser.add_argument("--control-port", type=int, default=7000,
                         help="UDP control port used by transmitter settings channel")
+    parser.add_argument("--rtsp", nargs="*", type=str, default=default_rtsp_urls,
+                        metavar="URL",
+                        help="Optional RTSP URL(s) to show as additional feeds")
+    parser.add_argument("--rtsp-latency-ports", nargs="*", type=int, default=default_rtsp_latency_ports,
+                        metavar="PORT",
+                        help="Optional latency telemetry UDP port(s) for RTSP feed(s), same JSON format as UDP telemetry")
     args = parser.parse_args()
 
-    print_receiver_startup_config(args, default_camera_count, default_base_port)
+    print_receiver_startup_config(args, default_camera_count, default_base_port, default_rtsp_urls, default_rtsp_latency_ports)
 
     signal.signal(signal.SIGINT, signal_handler)
 
@@ -1441,6 +1518,8 @@ Example usage:
         height=args.height,
         host=args.host,
         control_port=args.control_port,
+        rtsp_urls=args.rtsp,
+        rtsp_latency_ports=args.rtsp_latency_ports,
     )
     Gtk.main()
 
