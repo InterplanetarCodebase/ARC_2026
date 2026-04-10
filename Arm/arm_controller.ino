@@ -9,6 +9,8 @@
 
 // ---------- PIN DEFINITIONS ----------
 const int SERVO_PIN = 22;
+const int ENC1_PIN = 13;
+const int ENC2_PIN = 33;
 
 // BTS7960 Motor Drivers
 const int RPWM1 = 25, LPWM1 = 26;  // Motor 1 (base rotation or shoulder)
@@ -54,9 +56,19 @@ const int IN3 = 5,  IN4 = 18;      // Motor 4B
 #define STATUS_ESTOP     0x03
 
 // ---------- WATCHDOG ----------
-#define WATCHDOG_TIMEOUT_MS 1000  // 1 second — if no packet, ESTOP
+#define WATCHDOG_TIMEOUT_MS 3000  //  second — if no packet, ESTOP
 unsigned long lastPacketTime = 0;
 bool watchdogTripped = false;
+
+// ---------- ENCODERS (ANALOG READ) ----------
+#define ENCODER_SAMPLE_MS 20
+#define ENCODER_DEBUG_SERIAL 1  // Keep 0 during binary protocol operation.
+
+uint16_t encoder1Raw = 0;
+uint16_t encoder2Raw = 0;
+float encoder1Voltage = 0.0f;
+float encoder2Voltage = 0.0f;
+unsigned long lastEncoderSampleMs = 0;
 
 // ---------- STATE ----------
 Servo myservo;
@@ -101,6 +113,38 @@ void emergencyStop() {
   digitalWrite(IN1, LOW); digitalWrite(IN2, LOW);
   digitalWrite(IN3, LOW); digitalWrite(IN4, LOW);
   watchdogTripped = true;
+}
+
+// ================================================================
+// Read analog encoder channels
+// ================================================================
+void updateEncoders() {
+  unsigned long now = millis();
+  if (now - lastEncoderSampleMs < ENCODER_SAMPLE_MS) return;
+  lastEncoderSampleMs = now;
+
+  encoder1Raw = analogRead(ENC1_PIN);
+  encoder2Raw = analogRead(ENC2_PIN);
+
+  encoder1Voltage = encoder1Raw * (3.3f / 4095.0f);
+  encoder2Voltage = encoder2Raw * (3.3f / 4095.0f);
+
+#if ENCODER_DEBUG_SERIAL
+  // WARNING: This prints plain text on Serial and will interfere with
+  // binary packet parsing on the host. Enable only for standalone debug.
+  static unsigned long lastPrintMs = 0;
+  if (now - lastPrintMs >= 200) {
+    lastPrintMs = now;
+    Serial.print("ENC1 raw=");
+    Serial.print(encoder1Raw);
+    Serial.print(" V=");
+    Serial.print(encoder1Voltage, 3);
+    Serial.print(" | ENC2 raw=");
+    Serial.print(encoder2Raw);
+    Serial.print(" V=");
+    Serial.println(encoder2Voltage, 3);
+  }
+#endif
 }
 
 // ================================================================
@@ -197,6 +241,12 @@ void setup() {
   pinMode(RPWM3, OUTPUT); pinMode(LPWM3, OUTPUT);
   pinMode(IN1, OUTPUT);   pinMode(IN2, OUTPUT);
   pinMode(IN3, OUTPUT);   pinMode(IN4, OUTPUT);
+  pinMode(ENC1_PIN, INPUT);
+  pinMode(ENC2_PIN, INPUT);
+
+  analogReadResolution(12);
+  analogSetPinAttenuation(ENC1_PIN, ADC_11db);
+  analogSetPinAttenuation(ENC2_PIN, ADC_11db);
 
   myservo.attach(SERVO_PIN);
   myservo.write(90);  // Center on boot
@@ -211,6 +261,9 @@ void setup() {
 // LOOP
 // ================================================================
 void loop() {
+
+  // Keep encoder readings updated in the main control loop.
+  updateEncoders();
 
   // --- Watchdog check ---
   if (!watchdogTripped && (millis() - lastPacketTime > WATCHDOG_TIMEOUT_MS)) {

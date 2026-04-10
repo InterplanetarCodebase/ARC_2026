@@ -1470,7 +1470,7 @@ def main():
     default_base_port = 5000
     default_ports = [default_base_port + idx for idx in range(default_camera_count)]
     default_rtsp_urls = [
-        "rtsp://admin:Interplanetar123@192.168.1.141:554/live/0/SUB",
+        "rtsp://admin:Interplanetar123@192.168.1.141:554/live/0/MAIN",
     ]
     default_rtsp_latency_ports = []
 

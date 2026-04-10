@@ -6,16 +6,18 @@ arm_receiver.py  —  Runs on Jetson Xavier
 - Validates CRC, sequence, deduplication
 - Forwards commands to ESP32 via USB Serial
 - Reads ACKs from ESP32 and relays them back to base station
+- Reads encoder/pot values from ESP32 serial and relays them to base station
 - Sends heartbeat to ESP32 watchdog
 - Watchdog: if no UDP from base for >2s, sends ESTOP to ESP32
 """
 
 import socket
 import serial
-import struct
 import threading
 import time
 import logging
+import json
+import re
 
 logging.basicConfig(
     level=logging.INFO,
@@ -34,6 +36,7 @@ SERIAL_BAUD     = 921600
 
 WATCHDOG_TIMEOUT = 2.0   # seconds — no UDP → ESTOP ESP32
 HEARTBEAT_INTERVAL = 0.2 # seconds — keep ESP32 watchdog alive
+TELEMETRY_MIN_INTERVAL = 0.05  # seconds — encoder relay throttle
 
 # ─── PROTOCOL ─────────────────────────────────────────────────────
 SOF1        = 0xAA
@@ -72,15 +75,107 @@ esp_seq         = 0        # our own seq counter for heartbeats
 
 # ─── SERIAL ACK READER ────────────────────────────────────────────
 ack_buffer = bytearray()
+text_buffer = bytearray()
+last_telemetry_sent = 0.0
+
+# Supported serial line formats from firmware:
+# 1) ENC1 raw=123 V=0.991 | ENC2 raw=456 V=1.234
+# 2) Pin 13 -> Raw: 123 Pin 33 -> Raw: 456
+ENC_RE_FMT1 = re.compile(
+    r"ENC1\s*raw\s*=\s*(\d+).*?V\s*=\s*([0-9]+(?:\.[0-9]+)?)"
+    r".*?ENC2\s*raw\s*=\s*(\d+).*?V\s*=\s*([0-9]+(?:\.[0-9]+)?)",
+    re.IGNORECASE,
+)
+ENC_RE_FMT2 = re.compile(
+    r"Pin\s*13\s*->\s*Raw:\s*(\d+).*?Pin\s*33\s*->\s*Raw:\s*(\d+)",
+    re.IGNORECASE,
+)
+
+
+def parse_encoder_line(line: str):
+    """Return normalized encoder payload dict or None."""
+    line = line.strip()
+    if not line:
+        return None
+
+    m = ENC_RE_FMT1.search(line)
+    if m:
+        enc1_raw = int(m.group(1))
+        enc1_v = float(m.group(2))
+        enc2_raw = int(m.group(3))
+        enc2_v = float(m.group(4))
+        return {
+            "type": "encoder",
+            "enc1_raw": enc1_raw,
+            "enc2_raw": enc2_raw,
+            "enc1_v": enc1_v,
+            "enc2_v": enc2_v,
+            "ts": time.time(),
+        }
+
+    m = ENC_RE_FMT2.search(line)
+    if m:
+        enc1_raw = int(m.group(1))
+        enc2_raw = int(m.group(2))
+        return {
+            "type": "encoder",
+            "enc1_raw": enc1_raw,
+            "enc2_raw": enc2_raw,
+            "enc1_v": enc1_raw * (3.3 / 4095.0),
+            "enc2_v": enc2_raw * (3.3 / 4095.0),
+            "ts": time.time(),
+        }
+
+    return None
+
+
+def relay_encoder_payload(udp_sock: socket.socket, payload: dict):
+    global last_telemetry_sent
+
+    now = time.time()
+    if now - last_telemetry_sent < TELEMETRY_MIN_INTERVAL:
+        return
+
+    with state_lock:
+        base_ip = BASE_IP
+        base_port = BASE_PORT
+
+    if not base_ip or not base_port:
+        return
+
+    try:
+        # Keep telemetry plain and human-readable: raw values are forwarded as-is.
+        udp_sock.sendto(json.dumps(payload).encode("utf-8"), (base_ip, base_port))
+        last_telemetry_sent = now
+    except Exception as e:
+        log.error(f"Telemetry relay error: {e}")
 
 def read_acks(ser: serial.Serial, udp_sock: socket.socket):
-    """Reads ACK bytes from ESP32, reassembles, forwards to base."""
-    global ack_buffer
+    """Reads serial stream from ESP32 and relays ACK + encoder telemetry."""
+    global ack_buffer, text_buffer
     while True:
         try:
             chunk = ser.read(ser.in_waiting or 1)
             if chunk:
                 ack_buffer.extend(chunk)
+
+                # Build a printable-only stream to parse telemetry text lines.
+                for b in chunk:
+                    if b in (10, 13) or 32 <= b <= 126:
+                        text_buffer.append(b)
+
+                while True:
+                    nl_idx = text_buffer.find(b"\n")
+                    if nl_idx < 0:
+                        break
+                    line_bytes = bytes(text_buffer[:nl_idx]).strip(b"\r")
+                    del text_buffer[:nl_idx + 1]
+
+                    line = line_bytes.decode("utf-8", errors="ignore")
+                    payload = parse_encoder_line(line)
+                    if payload is not None:
+                        relay_encoder_payload(udp_sock, payload)
+
                 # Parse all complete ACKs
                 while len(ack_buffer) >= ACK_LEN:
                     if ack_buffer[0] != ACK_BYTE:
