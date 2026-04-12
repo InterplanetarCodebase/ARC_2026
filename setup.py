@@ -8,6 +8,7 @@ setup(
     name=package_name,
     version='0.1.0',
     packages=[package_name],
+    package_data={package_name: ['image.png']},
     data_files=[
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
@@ -22,6 +23,8 @@ setup(
             'gui_node          = interplanetar_rover.gui_node:main',
             'wheel_bridge_node = interplanetar_rover.wheel_bridge_node:main',
             'arm_bridge_node   = interplanetar_rover.arm_bridge_node:main',
+            'camera_receiver_node    = interplanetar_rover.camera_receiver_node:main',
+            'camera_transmitter_node = interplanetar_rover.camera_transmitter_node:main',
         ],
     },
 )
