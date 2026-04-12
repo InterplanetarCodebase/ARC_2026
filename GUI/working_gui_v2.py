@@ -12,6 +12,7 @@ Each tab can be popped out into a separate window.
 
 import glob
 import json
+import math
 import os
 import signal
 import socket
@@ -80,17 +81,51 @@ ACK_LEN = 4
 
 VEL_MAX_TURNS_PER_S = 5.0
 
-# Match BLDC GUI shaping so joystick movement feels consistent.
 DEADZONE = 0.08
 DRIVE_SENSITIVITY_X = 0.55
 DRIVE_SENSITIVITY_Z = 0.50
 DRIVE_EXPO = 1.8
 
-# Higher refresh + light low-pass filtering for fluid indicators.
 UI_TICK_MS = 16
 AXIS_FILTER_ALPHA = 0.22
 VALUE_FILTER_ALPHA = 0.16
+ARM_POSE_FILTER_ALPHA = 0.06
 SERVO_STEP_INTERVAL_S = 0.05
+WRIST_ROLL_PWM = 10
+
+ARM_BUTTON_LABELS = [
+	"North -> Elbow (Up)",
+	"South -> Elbow (Down)",
+	"East -> Base (Right)",
+	"West -> Base (Left)",
+	"Btn 6 -> Shoulder (Up)",
+	"Btn 4 -> Shoulder (Down)",
+	"Btn 5 -> Wrist_pitch (Up)",
+	"Btn 3 -> Wrist_pitch (Down)",
+	"Btn 8 -> Gripper (Open)",
+	"Btn 7 -> Gripper (Close)",
+	"Btn 10 -> Wrist_roll (right)",
+	"Btn 9 -> wrist_roll (left)",
+]
+
+MOTOR_KEYS = ["FL", "RL", "FR", "RR"]
+MOTOR_INDEX = {
+	"FL": ("odrv0", "axis0"),
+	"RL": ("odrv0", "axis1"),
+	"FR": ("odrv1", "axis0"),
+	"RR": ("odrv1", "axis1"),
+}
+VALUE_FIELDS = [
+	("iq", "Iq (A)"),
+	("id_m", "Id (A)"),
+	("ibus", "Ibus (A)"),
+	("fet_temp", "FET Temp (C)"),
+	("axis_error", "Axis Error"),
+	("motor_error", "Motor Error"),
+	("encoder_error", "Encoder Error"),
+	("controller_error", "Controller Error"),
+	("pos", "Pos"),
+]
 
 
 CSS = b"""
@@ -126,6 +161,8 @@ notebook tab:hover   { background: #151a22; color: #cc7700; }
 				  color: #ff8800; letter-spacing: 1px; }
 .label          { font-family: "Courier New"; font-size: 10px; color: #cc7700; }
 .value          { font-family: "Courier New"; font-size: 11px; color: #ffb060; }
+.tele-label     { font-family: "Courier New"; font-size: 11px; color: #d68a34; }
+.tele-value     { font-family: "Courier New"; font-size: 12px; color: #ffc07a; }
 
 .ctrl-btn       { font-family: "Courier New"; font-size: 10px; color: #ff8800;
 				  background: #0b141e; border: 1px solid #2a1800;
@@ -256,6 +293,401 @@ def fmt_value(value, fmt_spec):
 		return format(float(value), fmt_spec)
 	except Exception:
 		return "--"
+
+
+class RingBuffer:
+	def __init__(self, maxlen):
+		self.maxlen = int(maxlen)
+		self.data = []
+
+	def append(self, value):
+		self.data.append(float(value))
+		if len(self.data) > self.maxlen:
+			self.data = self.data[-self.maxlen :]
+
+	def values(self):
+		return self.data
+
+
+class WheelTelemetryView(Gtk.Box):
+	def __init__(self):
+		super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+		self.set_hexpand(True)
+		self.set_vexpand(True)
+
+		self.wheel_circum_m = math.pi * 0.20
+		self.track_width_m = 0.762
+		self.right_sign = -1.0
+		self.fwd_sign = -1.0
+		self.prev_l = None
+		self.prev_r = None
+		self.prev_t = None
+		self.x = 0.0
+		self.y = 0.0
+		self.yaw = 0.0
+		self.path = [(0.0, 0.0)]
+
+		self.t_buf = RingBuffer(1200)
+		self.iq0_buf = RingBuffer(1200)
+		self.iq1_buf = RingBuffer(1200)
+		self.id0_buf = RingBuffer(1200)
+		self.id1_buf = RingBuffer(1200)
+
+		self.values = {field: {m: None for m in MOTOR_KEYS} for field, _name in VALUE_FIELDS}
+
+		self.vbus0_lbl = None
+		self.vbus1_lbl = None
+		self.value_cells = {}
+		self.map_area = None
+
+		self._build_ui()
+
+	def _build_ui(self):
+		map_frame, map_box = panel("WHEEL ODOM 2D MAP")
+		self.map_area = Gtk.DrawingArea()
+		self.map_area.set_size_request(-1, 220)
+		self.map_area.set_hexpand(True)
+		self.map_area.connect("draw", self._draw_map)
+		map_box.pack_start(self.map_area, True, True, 0)
+
+		graph_frame, graph_box = panel("ODRIVE CURRENT GRAPHS")
+		graphs_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+		self.iq_area = Gtk.DrawingArea()
+		self.id_area = Gtk.DrawingArea()
+		self.iq_area.set_size_request(-1, 170)
+		self.id_area.set_size_request(-1, 170)
+		self.iq_area.set_hexpand(True)
+		self.id_area.set_hexpand(True)
+		self.iq_area.connect("draw", self._draw_iq)
+		self.id_area.connect("draw", self._draw_id)
+		graphs_row.pack_start(self.iq_area, True, True, 0)
+		graphs_row.pack_start(self.id_area, True, True, 0)
+		graph_box.pack_start(graphs_row, True, True, 0)
+
+		tele_frame, tele_box = panel("ODRIVE TELEMETRY VALUES")
+		tele_frame.set_hexpand(True)
+		tele_box.set_hexpand(True)
+		bus_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+		bus_row.set_hexpand(True)
+		_0row, self.vbus0_lbl = metric_row("Vbus ODrive0", "-- V")
+		_1row, self.vbus1_lbl = metric_row("Vbus ODrive1", "-- V")
+		_0row.set_hexpand(True)
+		_1row.set_hexpand(True)
+		style(self.vbus0_lbl, "tele-value")
+		style(self.vbus1_lbl, "tele-value")
+		bus_row.pack_start(_0row, True, True, 0)
+		bus_row.pack_start(_1row, True, True, 0)
+
+		grid = Gtk.Grid(column_spacing=10, row_spacing=4)
+		grid.set_hexpand(True)
+		grid.set_halign(Gtk.Align.FILL)
+		grid.set_column_homogeneous(True)
+		h0 = Gtk.Label(label="Metric")
+		style(h0, "label")
+		style(h0, "tele-label")
+		h0.set_xalign(0.0)
+		h0.set_hexpand(True)
+		grid.attach(h0, 0, 0, 1, 1)
+		for c, m in enumerate(MOTOR_KEYS, start=1):
+			h = Gtk.Label(label=m)
+			style(h, "label")
+			style(h, "tele-label")
+			h.set_xalign(1.0)
+			h.set_hexpand(True)
+			grid.attach(h, c, 0, 1, 1)
+
+		for r, (field, name) in enumerate(VALUE_FIELDS, start=1):
+			lbl = Gtk.Label(label=name)
+			style(lbl, "label")
+			style(lbl, "tele-label")
+			lbl.set_xalign(0.0)
+			lbl.set_hexpand(True)
+			grid.attach(lbl, 0, r, 1, 1)
+			self.value_cells[field] = {}
+			for c, m in enumerate(MOTOR_KEYS, start=1):
+				v = Gtk.Label(label="--")
+				style(v, "value")
+				style(v, "tele-value")
+				v.set_xalign(1.0)
+				v.set_hexpand(True)
+				grid.attach(v, c, r, 1, 1)
+				self.value_cells[field][m] = v
+
+		tele_box.pack_start(bus_row, False, True, 0)
+		tele_box.pack_start(grid, True, True, 0)
+
+		self.pack_start(map_frame, False, False, 0)
+		self.pack_start(graph_frame, False, False, 0)
+		self.pack_start(tele_frame, True, True, 0)
+
+	@staticmethod
+	def _axis_obj(board, axis_name):
+		axes = board.get("axes", {}) if isinstance(board, dict) else {}
+		axis = axes.get(axis_name, {}) if isinstance(axes, dict) else {}
+		return axis if isinstance(axis, dict) else {}
+
+	def _set_color_hex(self, cr, hex_color):
+		h = hex_color.lstrip("#")
+		if len(h) != 6:
+			cr.set_source_rgb(1.0, 1.0, 1.0)
+			return
+		r = int(h[0:2], 16) / 255.0
+		g = int(h[2:4], 16) / 255.0
+		b = int(h[4:6], 16) / 255.0
+		cr.set_source_rgb(r, g, b)
+
+	def _fmt_cell(self, field, value):
+		if value is None:
+			return "--"
+		if "error" in field:
+			return f"0x{int(value):08X}"
+		return f"{float(value):.2f}"
+
+	def _avg_pair(self, d, a, b):
+		va = d.get(a)
+		vb = d.get(b)
+		vals = [v for v in (va, vb) if v is not None]
+		if not vals:
+			return None
+		return sum(vals) / float(len(vals))
+
+	def update_from_telemetry(self, telemetry, ts_monotonic):
+		if not isinstance(telemetry, dict):
+			return
+
+		odrv0 = telemetry.get("odrv0", {}) if isinstance(telemetry, dict) else {}
+		odrv1 = telemetry.get("odrv1", {}) if isinstance(telemetry, dict) else {}
+
+		for m, (board_name, axis_name) in MOTOR_INDEX.items():
+			board = odrv0 if board_name == "odrv0" else odrv1
+			axis = self._axis_obj(board, axis_name)
+			self.values["iq"][m] = axis.get("iq_measured")
+			self.values["id_m"][m] = axis.get("id_measured")
+			self.values["ibus"][m] = axis.get("ibus")
+			self.values["fet_temp"][m] = axis.get("fet_thermistor_temp")
+			self.values["axis_error"][m] = axis.get("axis_error")
+			self.values["motor_error"][m] = axis.get("motor_error")
+			self.values["encoder_error"][m] = axis.get("encoder_error")
+			self.values["controller_error"][m] = axis.get("controller_error")
+			self.values["pos"][m] = axis.get("pos_estimate")
+
+		self.vbus0_lbl.set_text(f"{fmt_value(odrv0.get('vbus_voltage'), '.2f')} V")
+		self.vbus1_lbl.set_text(f"{fmt_value(odrv1.get('vbus_voltage'), '.2f')} V")
+
+		iq0 = self._avg_pair(self.values["iq"], "FL", "RL")
+		iq1 = self._avg_pair(self.values["iq"], "FR", "RR")
+		id0 = self._avg_pair(self.values["id_m"], "FL", "RL")
+		id1 = self._avg_pair(self.values["id_m"], "FR", "RR")
+		if iq0 is not None and iq1 is not None and id0 is not None and id1 is not None:
+			self.t_buf.append(ts_monotonic)
+			self.iq0_buf.append(iq0)
+			self.iq1_buf.append(iq1)
+			self.id0_buf.append(id0)
+			self.id1_buf.append(id1)
+
+		fl = self.values["pos"].get("FL")
+		rl = self.values["pos"].get("RL")
+		fr = self.values["pos"].get("FR")
+		rr = self.values["pos"].get("RR")
+		if all(v is not None for v in (fl, rl, fr, rr)):
+			left = ((fl + rl) * 0.5) * self.fwd_sign
+			right = ((fr + rr) * 0.5) * self.right_sign * self.fwd_sign
+			if self.prev_l is None:
+				self.prev_l, self.prev_r, self.prev_t = left, right, ts_monotonic
+			else:
+				dt = ts_monotonic - self.prev_t
+				if dt > 0.0:
+					dl = (left - self.prev_l) * self.wheel_circum_m
+					dr = (right - self.prev_r) * self.wheel_circum_m
+					dc = (dl + dr) * 0.5
+					dyaw = (dr - dl) / self.track_width_m
+					ym = self.yaw + 0.5 * dyaw
+					self.x += dc * math.cos(ym)
+					self.y += dc * math.sin(ym)
+					self.yaw = math.atan2(math.sin(self.yaw + dyaw), math.cos(self.yaw + dyaw))
+					self.path.append((self.x, self.y))
+					if len(self.path) > 1200:
+						self.path = self.path[-1200:]
+				self.prev_l, self.prev_r, self.prev_t = left, right, ts_monotonic
+
+		for field, _name in VALUE_FIELDS:
+			for m in MOTOR_KEYS:
+				self.value_cells[field][m].set_text(self._fmt_cell(field, self.values[field][m]))
+
+		if self.map_area is not None:
+			self.map_area.queue_draw()
+		self.iq_area.queue_draw()
+		self.id_area.queue_draw()
+
+	def _draw_map(self, widget, cr):
+		w = max(1, widget.get_allocated_width())
+		h = max(1, widget.get_allocated_height())
+
+		self._set_color_hex(cr, "#091019")
+		cr.rectangle(0, 0, w, h)
+		cr.fill()
+
+		# Pure 2D top-down map: X right, Y up, origin fixed at map center.
+		# Uniform scaling keeps geometry and heading angles visually correct.
+		points = self.path if self.path else [(0.0, 0.0)]
+		r_max = 1.0
+		for px, py in points:
+			r_max = max(r_max, math.hypot(px, py))
+		r_max = max(r_max, math.hypot(self.x, self.y))
+
+		fit_radius_px = max(20.0, (min(w, h) * 0.45))
+		scale = fit_radius_px / r_max
+		scale = clamp(scale, 12.0, 80.0)
+		grid_step_px = max(18, int(scale))
+
+		cx, cy = (w * 0.5), (h * 0.5)
+
+		self._set_color_hex(cr, "#1b2c3d")
+		for i in range(int(cx % grid_step_px), w, grid_step_px):
+			cr.move_to(i, 0)
+			cr.line_to(i, h)
+		for j in range(int(cy % grid_step_px), h, grid_step_px):
+			cr.move_to(0, j)
+			cr.line_to(w, j)
+		cr.set_line_width(0.6)
+		cr.stroke()
+
+		self._set_color_hex(cr, "#2a3f52")
+		cr.set_line_width(1.0)
+		cr.move_to(cx, 0)
+		cr.line_to(cx, h)
+		cr.move_to(0, cy)
+		cr.line_to(w, cy)
+		cr.stroke()
+
+		def world_to_screen(px, py):
+			sx = cx + (px * scale)
+			sy = cy - (py * scale)
+			return sx, sy
+
+		self._set_color_hex(cr, "#ff8800")
+		cr.set_line_width(2.0)
+		sx0, sy0 = world_to_screen(points[0][0], points[0][1])
+		cr.move_to(sx0, sy0)
+		for px, py in points[1:]:
+			sx, sy = world_to_screen(px, py)
+			cr.line_to(sx, sy)
+		cr.stroke()
+
+		hx, hy = world_to_screen(self.x, self.y)
+		arrow_len = 18.0
+		ax = hx + arrow_len * math.cos(self.yaw)
+		ay = hy - arrow_len * math.sin(self.yaw)
+		self._set_color_hex(cr, "#00c8ff")
+		cr.set_line_width(3.0)
+		cr.move_to(hx, hy)
+		cr.line_to(ax, ay)
+		cr.stroke()
+
+		# Arrowhead
+		head_angle = math.atan2(ay - hy, ax - hx)
+		head_size = 8.0
+		for sign in (1, -1):
+			wing_angle = head_angle + sign * (math.pi * 0.75)
+			cr.move_to(ax, ay)
+			cr.line_to(ax + head_size * math.cos(wing_angle), ay + head_size * math.sin(wing_angle))
+		cr.stroke()
+
+		# Position dot
+		self._set_color_hex(cr, "#00c8ff")
+		cr.arc(hx, hy, 4, 0, 2 * math.pi)
+		cr.fill()
+
+		# Origin marker
+		self._set_color_hex(cr, "#7f8ea0")
+		cr.arc(cx, cy, 3, 0, 2 * math.pi)
+		cr.fill()
+
+		# Coordinate label
+		self._set_color_hex(cr, "#64748b")
+		cr.move_to(8, h - 6)
+		cr.show_text(f"2D map  scale={scale:.1f}px/m  x={self.x:.2f}m  y={self.y:.2f}m  yaw={math.degrees(self.yaw):.1f}°")
+
+	def _draw_two_line_graph(self, widget, cr, title, y0_buf, y1_buf):
+		w = max(1, widget.get_allocated_width())
+		h = max(1, widget.get_allocated_height())
+		self._set_color_hex(cr, "#091019")
+		cr.rectangle(0, 0, w, h)
+		cr.fill()
+
+		ts = self.t_buf.values()
+		y0 = y0_buf.values()
+		y1 = y1_buf.values()
+		n = min(len(ts), len(y0), len(y1))
+		if n < 2:
+			self._set_color_hex(cr, "#64748b")
+			cr.move_to(10, 18)
+			cr.show_text(title + "  (no data)")
+			return
+
+		ts = ts[-n:]
+		y0 = y0[-n:]
+		y1 = y1[-n:]
+		t0 = ts[0]
+		tn = max(1e-6, ts[-1] - t0)
+		y_min = min(min(y0), min(y1))
+		y_max = max(max(y0), max(y1))
+		if abs(y_max - y_min) < 1e-6:
+			y_max += 1.0
+			y_min -= 1.0
+
+		left = 32.0
+		top = 16.0
+		right = 10.0
+		bottom = 16.0
+		gw = max(1.0, w - left - right)
+		gh = max(1.0, h - top - bottom)
+
+		self._set_color_hex(cr, "#1b2c3d")
+		cr.rectangle(left, top, gw, gh)
+		cr.set_line_width(1.0)
+		cr.stroke()
+
+		def pt(t, y):
+			x = left + ((t - t0) / tn) * gw
+			yn = (y - y_min) / (y_max - y_min)
+			ys = top + gh - yn * gh
+			return x, ys
+
+		self._set_color_hex(cr, "#ff9446")
+		cr.set_line_width(1.8)
+		x, y = pt(ts[0], y0[0])
+		cr.move_to(x, y)
+		for i in range(1, n):
+			x, y = pt(ts[i], y0[i])
+			cr.line_to(x, y)
+		cr.stroke()
+
+		self._set_color_hex(cr, "#00d2ff")
+		cr.set_line_width(1.8)
+		x, y = pt(ts[0], y1[0])
+		cr.move_to(x, y)
+		for i in range(1, n):
+			x, y = pt(ts[i], y1[i])
+			cr.line_to(x, y)
+		cr.stroke()
+
+		self._set_color_hex(cr, "#64748b")
+		cr.move_to(8, 14)
+		cr.show_text(title)
+
+		# Y-axis range labels
+		self._set_color_hex(cr, "#3a5068")
+		cr.move_to(2, top + gh)
+		cr.show_text(f"{y_min:.1f}")
+		cr.move_to(2, top + 10)
+		cr.show_text(f"{y_max:.1f}")
+
+	def _draw_iq(self, widget, cr):
+		self._draw_two_line_graph(widget, cr, "Iq (A)  [orange=L  blue=R]", self.iq0_buf, self.iq1_buf)
+
+	def _draw_id(self, widget, cr):
+		self._draw_two_line_graph(widget, cr, "Id (A)  [orange=L  blue=R]", self.id0_buf, self.id1_buf)
 
 
 class ArmSender:
@@ -601,10 +1033,11 @@ class JoystickBridge:
 
 			now = time.monotonic()
 			if now - self._last_servo_step_at >= SERVO_STEP_INTERVAL_S:
-				if self.button(8):
+				# Remapped wrist-pitch control: Btn 5 up, Btn 3 down.
+				if self.button(4):
 					self.servo_angle = min(180, self.servo_angle + 2)
 					self._last_servo_step_at = now
-				elif self.button(9):
+				elif self.button(2):
 					self.servo_angle = max(0, self.servo_angle - 2)
 					self._last_servo_step_at = now
 		except BlockingIOError:
@@ -630,6 +1063,7 @@ class ModuleView(Gtk.Box):
 
 		self.wheel_bars = {}
 		self.odrive_values = {}
+		self.wheel_segment = None
 		self.right_bars = {}
 		self.right_value_labels = {}
 		self.right_buttons = {}
@@ -656,9 +1090,18 @@ class ModuleView(Gtk.Box):
 		self._pane_initialized = False
 		self.connect("size-allocate", self._on_size_allocate)
 
-		left.pack_start(self._build_wheel_controls(), True, True, 0)
-		left.pack_start(self._build_odrive_panel(), True, True, 0)
+		left.pack_start(self._build_wheel_segment(), True, True, 0)
 		right.pack_start(self._build_right_controls(right_title, right_button_labels, right_level_labels), True, True, 0)
+
+	def _build_wheel_segment(self):
+		frame, root = panel("WHEEL SEGMENT")
+		self.wheel_segment = WheelTelemetryView()
+		root.pack_start(self.wheel_segment, True, True, 0)
+		return frame
+
+	def update_wheel_telemetry(self, telemetry, ts_monotonic):
+		if self.wheel_segment is not None:
+			self.wheel_segment.update_from_telemetry(telemetry, ts_monotonic)
 
 	def _on_size_allocate(self, _widget, allocation):
 		if self._pane_initialized:
@@ -844,18 +1287,228 @@ class ArmWheelView(ModuleView):
 	def __init__(self):
 		super().__init__(
 			right_title="ARM CONTROLS",
-			right_button_labels=[
-				"ARM BTN 1", "ARM BTN 2", "ARM BTN 3", "ARM BTN 4",
-				"ARM BTN 5", "ARM BTN 6", "ARM BTN 7", "ARM BTN 8",
-				"ARM BTN 9", "ARM BTN 10", "ARM BTN 11", "ARM BTN 12",
-			],
+			right_button_labels=ARM_BUTTON_LABELS,
 			right_level_labels=[
-				"Joint 1", "Joint 2", "Joint 3", "Joint 4",
-				"Joint 5", "Joint 6", "Grip Force", "Arm Load",
+				"Base", "Shoulder", "Elbow", "Gripper",
+				"Wrist Roll", "Wrist Pitch", "Grip Force", "Arm Load",
 			],
 		)
 		self.arm_feedback_labels = {}
-		self._build_arm_feedback_panel()
+		self.encoder_value_labels = {}
+		self.arm_joint_norm = {
+			"Base": 0.5,
+			"Shoulder": 0.5,
+			"Elbow": 0.5,
+			"Wrist Pitch": 0.5,
+			"Wrist Roll": 0.5,
+			"Gripper": 0.5,
+		}
+		self.arm_joint_display = dict(self.arm_joint_norm)
+		self.arm_joint_active = {k: 0.0 for k in self.arm_joint_norm.keys()}
+		self.arm_area = None
+		self._build_arm_right_segment()
+
+	def _clear_right_column(self):
+		for child in self._right_col.get_children():
+			self._right_col.remove(child)
+
+	def _build_arm_right_segment(self):
+		self._clear_right_column()
+
+		top_frame, top_box = panel("ARM 2D SKELETON")
+		top_frame.set_hexpand(True)
+		self.arm_area = Gtk.DrawingArea()
+		self.arm_area.set_size_request(-1, 250)
+		self.arm_area.set_hexpand(True)
+		self.arm_area.connect("draw", self._draw_arm_skeleton)
+		top_box.pack_start(self.arm_area, True, True, 0)
+
+		mid_frame, mid_box = panel("ARM MID SECTION")
+		mid_frame.set_hexpand(True)
+		mid_frame.set_vexpand(True)
+		placeholder = Gtk.Label(label="Reserved")
+		style(placeholder, "label")
+		placeholder.set_halign(Gtk.Align.CENTER)
+		placeholder.set_valign(Gtk.Align.CENTER)
+		placeholder.set_hexpand(True)
+		placeholder.set_vexpand(True)
+		mid_box.pack_start(placeholder, True, True, 0)
+
+		bot_frame, bot_box = panel("ARM ENCODER VALUES")
+		bot_frame.set_hexpand(True)
+		ack_row, self.arm_feedback_labels["ack"] = metric_row("ACK", "--", width_chars=16)
+		age_row, self.arm_feedback_labels["ack_age"] = metric_row("ACK Age", "--", width_chars=10)
+		bot_box.pack_start(ack_row, False, True, 0)
+		bot_box.pack_start(age_row, False, True, 0)
+
+		grid = Gtk.Grid(column_spacing=10, row_spacing=4)
+		grid.set_hexpand(True)
+		h_enc = Gtk.Label(label="Encoder")
+		h_raw = Gtk.Label(label="Raw")
+		h_v = Gtk.Label(label="Voltage")
+		for h in (h_enc, h_raw, h_v):
+			style(h, "label")
+		grid.attach(h_enc, 0, 0, 1, 1)
+		grid.attach(h_raw, 1, 0, 1, 1)
+		grid.attach(h_v, 2, 0, 1, 1)
+
+		for idx in range(1, 6):
+			name = Gtk.Label(label=f"ENC{idx}")
+			name.set_xalign(0.0)
+			style(name, "label")
+			raw_lbl = Gtk.Label(label="--")
+			raw_lbl.set_xalign(1.0)
+			style(raw_lbl, "value")
+			v_lbl = Gtk.Label(label="--")
+			v_lbl.set_xalign(1.0)
+			style(v_lbl, "value")
+			grid.attach(name, 0, idx, 1, 1)
+			grid.attach(raw_lbl, 1, idx, 1, 1)
+			grid.attach(v_lbl, 2, idx, 1, 1)
+			self.encoder_value_labels[f"enc{idx}_raw"] = raw_lbl
+			self.encoder_value_labels[f"enc{idx}_v"] = v_lbl
+
+		bot_box.pack_start(grid, False, True, 0)
+
+		self._right_col.pack_start(top_frame, False, True, 0)
+		self._right_col.pack_start(mid_frame, True, True, 0)
+		self._right_col.pack_start(bot_frame, False, True, 0)
+		self._right_col.show_all()
+
+	def update_arm_pose(self, joint_targets, active_flags):
+		for name in self.arm_joint_norm.keys():
+			if name in joint_targets:
+				self.arm_joint_norm[name] = clamp(float(joint_targets[name]), 0.0, 1.0)
+			self.arm_joint_display[name] = low_pass(
+				self.arm_joint_display[name],
+				self.arm_joint_norm[name],
+				ARM_POSE_FILTER_ALPHA,
+			)
+			self.arm_joint_active[name] = 1.0 if active_flags.get(name, False) else 0.0
+		if self.arm_area is not None:
+			self.arm_area.queue_draw()
+
+	def _draw_arm_skeleton(self, widget, cr):
+		w = max(1, widget.get_allocated_width())
+		h = max(1, widget.get_allocated_height())
+
+		def set_hex(hex_color):
+			hv = hex_color.lstrip("#")
+			r = int(hv[0:2], 16) / 255.0
+			g = int(hv[2:4], 16) / 255.0
+			b = int(hv[4:6], 16) / 255.0
+			cr.set_source_rgb(r, g, b)
+
+		def mix(a, b, t):
+			return a + ((b - a) * t)
+
+		def joint_color(active):
+			t = clamp(active, 0.0, 1.0)
+			r = mix(0.70, 1.00, t)
+			g = mix(0.45, 0.85, t)
+			b = mix(0.12, 0.45, t)
+			cr.set_source_rgb(r, g, b)
+
+		set_hex("#091019")
+		cr.rectangle(0, 0, w, h)
+		cr.fill()
+
+		# Ground line
+		set_hex("#243648")
+		cr.set_line_width(1.0)
+		cr.move_to(12, h - 28)
+		cr.line_to(w - 12, h - 28)
+		cr.stroke()
+
+		cx = w * 0.5
+		cy = h - 42.0
+		base_yaw = math.radians((self.arm_joint_display["Base"] - 0.5) * 90.0)
+		shoulder = math.radians((self.arm_joint_display["Shoulder"] - 0.5) * 140.0)
+		# Keep a slight neutral bend so the arm doesn't appear unnaturally straight.
+		elbow = math.radians(18.0 + ((self.arm_joint_display["Elbow"] - 0.5) * 150.0))
+		wrist_pitch = math.radians(-10.0 + ((self.arm_joint_display["Wrist Pitch"] - 0.5) * 110.0))
+		wrist_roll = math.radians((self.arm_joint_display["Wrist Roll"] - 0.5) * 180.0)
+		gripper = self.arm_joint_display["Gripper"]
+
+		l1, l2, l3 = 58.0, 50.0, 34.0
+		a1 = (-math.pi / 2.0) + shoulder
+		a2 = a1 + elbow
+		a3 = a2 + wrist_pitch
+
+		p0 = (cx, cy)
+		p1 = (p0[0] + (l1 * math.cos(a1)), p0[1] + (l1 * math.sin(a1)))
+		p2 = (p1[0] + (l2 * math.cos(a2)), p1[1] + (l2 * math.sin(a2)))
+		p3 = (p2[0] + (l3 * math.cos(a3)), p2[1] + (l3 * math.sin(a3)))
+
+		# Base pedestal and yaw indicator
+		set_hex("#2e465e")
+		cr.rectangle(cx - 16, cy - 8, 32, 16)
+		cr.fill()
+		joint_color(self.arm_joint_active["Base"])
+		cr.set_line_width(3.0)
+		cr.arc(cx, cy, 12.0, 0, 2 * math.pi)
+		cr.stroke()
+		cr.set_line_width(2.0)
+		cr.move_to(cx, cy)
+		cr.line_to(cx + 16.0 * math.cos(base_yaw), cy - 16.0 * math.sin(base_yaw))
+		cr.stroke()
+
+		# Links
+		set_hex("#6f7f90")
+		cr.set_line_width(5.0)
+		cr.move_to(p0[0], p0[1])
+		cr.line_to(p1[0], p1[1])
+		cr.line_to(p2[0], p2[1])
+		cr.line_to(p3[0], p3[1])
+		cr.stroke()
+
+		# Joints
+		for name, (jx, jy), rad in (
+			("Shoulder", p0, 6.5),
+			("Elbow", p1, 6.0),
+			("Wrist Pitch", p2, 5.8),
+		):
+			joint_color(self.arm_joint_active[name])
+			cr.arc(jx, jy, rad, 0, 2 * math.pi)
+			cr.fill()
+
+		# Wrist roll ring at tool point
+		joint_color(self.arm_joint_active["Wrist Roll"])
+		cr.set_line_width(2.6)
+		cr.arc(p3[0], p3[1], 8.5, 0, 2 * math.pi)
+		cr.stroke()
+		cr.set_line_width(2.0)
+		rx = p3[0] + 7.0 * math.cos(wrist_roll)
+		ry = p3[1] + 7.0 * math.sin(wrist_roll)
+		cr.move_to(p3[0], p3[1])
+		cr.line_to(rx, ry)
+		cr.stroke()
+
+		# Gripper jaws
+		open_px = 4.0 + (gripper * 8.0)
+		gx, gy = p3
+		joint_color(self.arm_joint_active["Gripper"])
+		cr.set_line_width(2.4)
+		cr.move_to(gx + 10.0, gy)
+		cr.line_to(gx + 20.0, gy - open_px)
+		cr.move_to(gx + 10.0, gy)
+		cr.line_to(gx + 20.0, gy + open_px)
+		cr.stroke()
+
+		# Nomenclature labels
+		set_hex("#c98a3a")
+		cr.move_to(cx - 20, cy + 18)
+		cr.show_text("Base")
+		cr.move_to(p0[0] - 54, p0[1] - 10)
+		cr.show_text("Shoulder")
+		cr.move_to(p1[0] - 34, p1[1] - 10)
+		cr.show_text("Elbow")
+		cr.move_to(p2[0] - 34, p2[1] - 10)
+		cr.show_text("Wrist Pitch")
+		cr.move_to(p3[0] - 28, p3[1] - 14)
+		cr.show_text("Wrist Roll")
+		cr.move_to(p3[0] + 16, p3[1] + 4)
+		cr.show_text("Gripper")
 
 	def _build_arm_feedback_panel(self):
 		frame, root = panel("ARM LINK / ENCODER FEEDBACK")
@@ -893,13 +1546,13 @@ class ArmWheelView(ModuleView):
 			self.arm_feedback_labels["ack_age"].set_text(f"{age:.2f}s" if age is not None else "--")
 
 		enc = arm_sender.last_encoder
-		self.arm_feedback_labels["enc1_raw"].set_text(str(enc.get("enc1_raw", "--")))
-		self.arm_feedback_labels["enc2_raw"].set_text(str(enc.get("enc2_raw", "--")))
-
-		v1 = enc.get("enc1_v")
-		v2 = enc.get("enc2_v")
-		self.arm_feedback_labels["enc1_v"].set_text("--" if v1 is None else f"{float(v1):.3f} V")
-		self.arm_feedback_labels["enc2_v"].set_text("--" if v2 is None else f"{float(v2):.3f} V")
+		for idx in range(1, 6):
+			raw_key = f"enc{idx}_raw"
+			v_key = f"enc{idx}_v"
+			raw_val = enc.get(raw_key)
+			v_val = enc.get(v_key)
+			self.encoder_value_labels[raw_key].set_text("--" if raw_val is None else str(raw_val))
+			self.encoder_value_labels[v_key].set_text("--" if v_val is None else f"{float(v_val):.3f} V")
 
 
 class ScienceView(Gtk.Box):
@@ -957,12 +1610,12 @@ class App(Gtk.Window):
 		self._flt_left_cmd = 0.0
 		self._flt_right_cmd = 0.0
 		self._flt_joints = {
-			"Joint 1": 0.5,
-			"Joint 2": 0.5,
-			"Joint 3": 0.5,
-			"Joint 4": 0.5,
-			"Joint 5": 0.5,
-			"Joint 6": 0.5,
+			"Base": 0.5,
+			"Shoulder": 0.5,
+			"Elbow": 0.5,
+			"Gripper": 0.5,
+			"Wrist Roll": 0.5,
+			"Wrist Pitch": 0.5,
 			"Grip Force": 0.0,
 			"Arm Load": 0.0,
 		}
@@ -1099,7 +1752,7 @@ class App(Gtk.Window):
 
 		arm_view = self.views.get("Arm & Wheel")
 		if isinstance(arm_view, ModuleView):
-			raw_y = clamp(-self.joystick.axis(1, 0.0), -1.0, 1.0)
+			raw_y = clamp(self.joystick.axis(1, 0.0), -1.0, 1.0)
 			raw_z = clamp(self.joystick.axis(2, 0.0), -1.0, 1.0)
 			raw_t = clamp(self.joystick.axis(3, -1.0), -1.0, 1.0)
 
@@ -1129,7 +1782,7 @@ class App(Gtk.Window):
 
 			hat_x, hat_y = self.joystick.hat
 
-			# Arm UDP command stream (same command mapping structure as BLDC GUI).
+			# Arm UDP command stream
 			if self.joystick.connected and (now_m - self.last_arm_send) >= SEND_RATE:
 				self.last_arm_send = now_m
 
@@ -1139,32 +1792,32 @@ class App(Gtk.Window):
 						self.last_cmd[key] = cmd
 						self.arm_packets_sent += 1
 
-				if hat_y > 0:
-					c1 = CMD_MOTOR1_FWD
-					self.motor_states[0] = "FWD"
-				elif hat_y < 0:
+				if hat_x > 0:
 					c1 = CMD_MOTOR1_REV
+					self.motor_states[0] = "FWD"
+				elif hat_x < 0:
+					c1 = CMD_MOTOR1_FWD
 					self.motor_states[0] = "REV"
 				else:
 					c1 = CMD_MOTOR1_STOP
 					self.motor_states[0] = "STOP"
 				maybe_send("m1", c1)
 
-				if hat_x > 0:
-					c2 = CMD_MOTOR2_FWD
-					self.motor_states[1] = "FWD"
-				elif hat_x < 0:
+				if self.joystick.button(5):
 					c2 = CMD_MOTOR2_REV
+					self.motor_states[1] = "FWD"
+				elif self.joystick.button(3):
+					c2 = CMD_MOTOR2_FWD
 					self.motor_states[1] = "REV"
 				else:
 					c2 = CMD_MOTOR2_STOP
 					self.motor_states[1] = "STOP"
 				maybe_send("m2", c2)
 
-				if self.joystick.button(2):
+				if hat_y > 0:
 					c3 = CMD_MOTOR3_FWD
 					self.motor_states[2] = "FWD"
-				elif self.joystick.button(3):
+				elif hat_y < 0:
 					c3 = CMD_MOTOR3_REV
 					self.motor_states[2] = "REV"
 				else:
@@ -1172,10 +1825,10 @@ class App(Gtk.Window):
 					self.motor_states[2] = "STOP"
 				maybe_send("m3", c3)
 
-				if self.joystick.button(4):
+				if self.joystick.button(7):
 					c4 = CMD_MOTOR4A_FWD
 					self.motor_states[3] = "FWD"
-				elif self.joystick.button(5):
+				elif self.joystick.button(6):
 					c4 = CMD_MOTOR4A_REV
 					self.motor_states[3] = "REV"
 				else:
@@ -1183,16 +1836,17 @@ class App(Gtk.Window):
 					self.motor_states[3] = "STOP"
 				maybe_send("m4", c4)
 
-				if self.joystick.button(6):
+				if self.joystick.button(9):
 					c5 = CMD_MOTOR4B_FWD
 					self.motor_states[4] = "FWD"
-				elif self.joystick.button(7):
+				elif self.joystick.button(8):
 					c5 = CMD_MOTOR4B_REV
 					self.motor_states[4] = "REV"
 				else:
 					c5 = CMD_MOTOR4B_STOP
 					self.motor_states[4] = "STOP"
-				maybe_send("m5", c5)
+				pwm5 = WRIST_ROLL_PWM if c5 in (CMD_MOTOR4B_FWD, CMD_MOTOR4B_REV) else 255
+				maybe_send("m5", c5, pwm5)
 
 				self.arm_sender.send(CMD_SERVO_ANGLE, self.joystick.servo_angle)
 				self.arm_packets_sent += 1
@@ -1206,54 +1860,56 @@ class App(Gtk.Window):
 				self.drive_packets_sent += 1
 
 			telemetry = self.drive_sender.telemetry if isinstance(self.drive_sender.telemetry, dict) else {}
-			odrv0 = telemetry.get("odrv0", {}) if isinstance(telemetry, dict) else {}
-			odrv1 = telemetry.get("odrv1", {}) if isinstance(telemetry, dict) else {}
-
-			arm_view.odrive_values["Vbus ODrive0"].set_text(f"{fmt_value(odrv0.get('vbus_voltage'), '.2f')} V")
-			arm_view.odrive_values["Vbus ODrive1"].set_text(f"{fmt_value(odrv1.get('vbus_voltage'), '.2f')} V")
-
-			def get_axis(board, axis_name):
-				if not isinstance(board, dict):
-					return {}
-				axes = board.get("axes", {})
-				if not isinstance(axes, dict):
-					return {}
-				axis = axes.get(axis_name, {})
-				return axis if isinstance(axis, dict) else {}
-
-			axis_map = {
-				"FL": get_axis(odrv0, "axis0"),
-				"RL": get_axis(odrv0, "axis1"),
-				"FR": get_axis(odrv1, "axis0"),
-				"RR": get_axis(odrv1, "axis1"),
-			}
-			for wheel, axis in axis_map.items():
-				arm_view.odrive_values[f"{wheel} Iq"].set_text(fmt_value(axis.get("iq_measured"), "+.2f"))
-				arm_view.odrive_values[f"{wheel} Id"].set_text(fmt_value(axis.get("id_measured"), "+.2f"))
-				arm_view.odrive_values[f"{wheel} Ibus"].set_text(fmt_value(axis.get("ibus"), "+.2f"))
-				arm_view.odrive_values[f"{wheel} Pos"].set_text(fmt_value(axis.get("pos_estimate"), "+.3f"))
+			arm_view.update_wheel_telemetry(telemetry, now_m)
 
 			def pair_to_unit(pos_idx, neg_idx):
 				return 1.0 if self.joystick.button(pos_idx) else (0.0 if self.joystick.button(neg_idx) else 0.5)
 
 			joint_targets = {
-				"Joint 1": (hat_y + 1) / 2.0,
-				"Joint 2": (hat_x + 1) / 2.0,
-				"Joint 3": pair_to_unit(2, 3),
-				"Joint 4": pair_to_unit(4, 5),
-				"Joint 5": pair_to_unit(6, 7),
-				"Joint 6": self.joystick.servo_angle / 180.0,
+				"Base": (hat_x + 1) / 2.0,
+				"Shoulder": pair_to_unit(5, 3),
+				"Elbow": (hat_y + 1) / 2.0,
+				"Gripper": pair_to_unit(7, 6),
+				"Wrist Roll": pair_to_unit(9, 8),
+				"Wrist Pitch": self.joystick.servo_angle / 180.0,
 				"Grip Force": 1.0 if self.joystick.button(0) else 0.0,
+			}
+			joint_active = {
+				"Base": hat_x != 0,
+				"Shoulder": self.joystick.button(5) or self.joystick.button(3),
+				"Elbow": hat_y != 0,
+				"Gripper": self.joystick.button(7) or self.joystick.button(6),
+				"Wrist Roll": self.joystick.button(9) or self.joystick.button(8),
+				"Wrist Pitch": self.joystick.button(4) or self.joystick.button(2),
 			}
 			for name, target in joint_targets.items():
 				self._flt_joints[name] = low_pass(self._flt_joints[name], target, VALUE_FILTER_ALPHA)
 				arm_view.set_right_value(name, self._flt_joints[name])
 
-			# Highlight Arm control buttons mapped to joystick buttons.
-			for i in range(12):
-				arm_view.set_right_button_pressed(f"ARM BTN {i + 1}", self.joystick.button(i))
+			if isinstance(arm_view, ArmWheelView):
+				arm_pose = {
+					"Base": self._flt_joints["Base"],
+					"Shoulder": self._flt_joints["Shoulder"],
+					"Elbow": self._flt_joints["Elbow"],
+					"Wrist Pitch": self._flt_joints["Wrist Pitch"],
+					"Wrist Roll": self._flt_joints["Wrist Roll"],
+					"Gripper": self._flt_joints["Gripper"],
+				}
+				arm_view.update_arm_pose(arm_pose, joint_active)
 
-			# Highlight wheel nav buttons from shaped axes.
+			arm_view.set_right_button_pressed("North -> Elbow (Up)", hat_y > 0)
+			arm_view.set_right_button_pressed("South -> Elbow (Down)", hat_y < 0)
+			arm_view.set_right_button_pressed("East -> Base (Right)", hat_x > 0)
+			arm_view.set_right_button_pressed("West -> Base (Left)", hat_x < 0)
+			arm_view.set_right_button_pressed("Btn 6 -> Shoulder (Up)", self.joystick.button(5))
+			arm_view.set_right_button_pressed("Btn 4 -> Shoulder (Down)", self.joystick.button(3))
+			arm_view.set_right_button_pressed("Btn 5 -> Wrist_pitch (Up)", self.joystick.button(4))
+			arm_view.set_right_button_pressed("Btn 3 -> Wrist_pitch (Down)", self.joystick.button(2))
+			arm_view.set_right_button_pressed("Btn 8 -> Gripper (Open)", self.joystick.button(7))
+			arm_view.set_right_button_pressed("Btn 7 -> Gripper (Close)", self.joystick.button(6))
+			arm_view.set_right_button_pressed("Btn 10 -> Wrist_roll (right)", self.joystick.button(9))
+			arm_view.set_right_button_pressed("Btn 9 -> wrist_roll (left)", self.joystick.button(8))
+
 			thr = 0.15
 			arm_view.set_wheel_nav_pressed("FWD", shaped_y > thr)
 			arm_view.set_wheel_nav_pressed("REV", shaped_y < -thr)
@@ -1288,7 +1944,7 @@ class App(Gtk.Window):
 			ws_state = "UP" if self.drive_sender.connected else "DOWN"
 			udp_state = "OK" if not self.arm_sender.last_error else "ERR"
 			self.status_lbl.set_text(
-				f"JOY CONNECTED (BG READY): {self.joystick.name}  AX[{ax0:+.2f} {ax1:+.2f} {ax2:+.2f} {ax3:+.2f}]  HAT{self.joystick.hat}  UDP:{udp_state}@{self.arm_sender.local_port} WS:{ws_state}"
+				f"JOY CONNECTED: {self.joystick.name}  AX[{ax0:+.2f} {ax1:+.2f} {ax2:+.2f} {ax3:+.2f}]  HAT{self.joystick.hat}  UDP:{udp_state}@{self.arm_sender.local_port} WS:{ws_state}"
 			)
 		else:
 			if self.joystick.last_error:

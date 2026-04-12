@@ -34,7 +34,7 @@ BASE_PORT       = None
 SERIAL_PORT     = "/dev/ttyUSB0"   # Change to your ESP32 port
 SERIAL_BAUD     = 921600
 
-WATCHDOG_TIMEOUT = 2.0   # seconds — no UDP → ESTOP ESP32
+WATCHDOG_TIMEOUT = 4.0   # seconds — no UDP → ESTOP ESP32
 HEARTBEAT_INTERVAL = 0.2 # seconds — keep ESP32 watchdog alive
 TELEMETRY_MIN_INTERVAL = 0.05  # seconds — encoder relay throttle
 
