@@ -36,6 +36,10 @@ SERVO_MIN, SERVO_MAX, SERVO_STEP = 0, 180, 2
 DEADZONE        = 0.08
 SEND_RATE       = 0.05   # 20 Hz
 WHEEL_SEND_RATE = 0.05
+DRIVE_SENSITIVITY_X = 0.55
+DRIVE_SENSITIVITY_Z = 0.50
+DRIVE_EXPO          = 1.8
+AXIS_FILTER_ALPHA   = 0.22
 
 # ── Motor display metadata ────────────────────────────────────────────────────
 MOTOR_NAMES = ["Base", "Shoulder", "Elbow", "Roller", "Gripper"]
@@ -120,6 +124,22 @@ def canvas_pos(screen_pos, W: int, H: int):
     ox = (W - ow) // 2;       oy = (H - oh) // 2
     return ((screen_pos[0] - ox) / scale,
             (screen_pos[1] - oy) / scale)
+
+def clamp(v, lo, hi):
+    return max(lo, min(hi, v))
+
+def shape_drive_axis(value, deadzone, sensitivity, expo):
+    """Apply deadzone + exponential response for finer center control."""
+    a = abs(value)
+    if a <= deadzone:
+        return 0.0
+    sign = 1.0 if value >= 0.0 else -1.0
+    norm = (a - deadzone) / (1.0 - deadzone)
+    shaped = (norm ** expo) * sensitivity
+    return sign * clamp(shaped, -1.0, 1.0)
+
+def low_pass(prev, target, alpha):
+    return prev + alpha * (target - prev)
 
 
 # ── Virtual (mouse-driven) input ──────────────────────────────────────────────
@@ -496,7 +516,9 @@ def main(args=None):
     last_arm_t   = 0.0
     last_wheel_t = 0.0
     wheel_x = wheel_z = wheel_thr = 0.0
+    wheel_cmd_fwd = wheel_cmd_turn = 0.0
     W, H = BASE_W, BASE_H
+    is_minimized = False
 
     while rclpy.ok():
         now = time.monotonic()
@@ -515,6 +537,13 @@ def main(args=None):
                 W, H = event.w, event.h
                 screen = pygame.display.set_mode(
                     (W, H), pygame.RESIZABLE | pygame.DOUBLEBUF)
+
+            if event.type in (pygame.WINDOWMINIMIZED, pygame.WINDOWHIDDEN):
+                is_minimized = True
+            if event.type in (pygame.WINDOWRESTORED, pygame.WINDOWSHOWN):
+                is_minimized = False
+            if event.type == pygame.WINDOWMAXIMIZED:
+                W, H = screen.get_size()
 
             # ── Mouse events ──────────────────────────────────────────────
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
@@ -539,6 +568,7 @@ def main(args=None):
             # ── Read inputs ───────────────────────────────────────────────
             if joy_connected:
                 try:
+                    pygame.event.pump()
                     axes    = [joy.get_axis(i)   for i in range(joy.get_numaxes())]
                     buttons = [joy.get_button(i) for i in range(joy.get_numbuttons())]
                     hats    = [joy.get_hat(i)    for i in range(joy.get_numhats())]
@@ -610,17 +640,28 @@ def main(args=None):
             # ── Wheels @ 20 Hz ────────────────────────────────────────────
             if (now - last_wheel_t) >= WHEEL_SEND_RATE:
                 last_wheel_t = now
-                raw_x = -ax_y; raw_z = ax_z
-                wheel_x   = raw_x if abs(raw_x) > DEADZONE else 0.0
-                wheel_z   = raw_z if abs(raw_z) > DEADZONE else 0.0
+                raw_x = -ax_y
+                raw_z = ax_z
+                wheel_x = shape_drive_axis(raw_x, DEADZONE,
+                                           DRIVE_SENSITIVITY_X, DRIVE_EXPO)
+                wheel_z = shape_drive_axis(raw_z, DEADZONE,
+                                           DRIVE_SENSITIVITY_Z, DRIVE_EXPO)
                 wheel_thr = (1.0 - ax_t) / 2.0
-                node.pub_cmd_vel(
-                    max(-1.0, min(1.0, wheel_x * wheel_thr)),
-                    max(-1.0, min(1.0, wheel_z * wheel_thr)))
+
+                cmd_fwd_target = clamp(wheel_x * wheel_thr, -1.0, 1.0)
+                cmd_turn_target = clamp(wheel_z * wheel_thr, -1.0, 1.0)
+                wheel_cmd_fwd = low_pass(wheel_cmd_fwd, cmd_fwd_target, AXIS_FILTER_ALPHA)
+                wheel_cmd_turn = low_pass(wheel_cmd_turn, cmd_turn_target, AXIS_FILTER_ALPHA)
+
+                node.pub_cmd_vel(wheel_cmd_fwd, wheel_cmd_turn)
                 wheel_msgs += 1
                 maybe_print_wheel(wheel_x, wheel_z, wheel_thr)
 
             rclpy.spin_once(node, timeout_sec=0)
+
+            if is_minimized:
+                clock.tick(60)
+                continue
 
             # ── Draw ──────────────────────────────────────────────────────
             canvas.fill(BG)
