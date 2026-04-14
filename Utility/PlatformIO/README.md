@@ -67,7 +67,7 @@ pio run --target upload --upload-port /dev/ttyUSB0
 ```
 
 ---
-
+    
 ## Serial Monitor
 
 A custom Python script (`monitor.py`) is used instead of PlatformIO's built-in monitor,

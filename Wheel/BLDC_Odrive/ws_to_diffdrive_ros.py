@@ -69,8 +69,6 @@ ODRV0_SERIAL = "336D33573235"
 ODRV1_SERIAL = "335A33633235"
 
 VEL_MAX      = 4.0    # max turns/s sent to ODrive — tune this
-CMD_TIMEOUT_S = 0.35   # safety timeout: stop if no fresh command arrives
-WATCHDOG_PERIOD_S = 0.05
 
 WHEEL_DIAMETER_M = 0.20
 TRACK_WIDTH_M = 0.762
@@ -452,8 +450,6 @@ def idle_all(odrv0, odrv1):
 last_seq: dict[str, int] = {}
 connected_clients: dict[str, object] = {}
 command_clients: set[str] = set()
-last_command_ts: float = 0.0
-failsafe_active: bool = False
 
 
 async def broadcast_telemetry(payload: str):
@@ -470,45 +466,8 @@ async def broadcast_telemetry(payload: str):
         command_clients.discard(client_id)
         log.info(f"Client removed during broadcast: {client_id}")
 
-
-async def command_watchdog(odrv0, odrv1):
-    """
-    SAFETY CRITICAL: Watchdog timer that stops motors if commands stop arriving.
-    Runs every WATCHDOG_PERIOD_S and checks if last command is older than CMD_TIMEOUT_S.
-    """
-    global failsafe_active
-    watchdog_iteration = 0
-    last_heartbeat_log = time.monotonic()
-    
-    log.info(f"WATCHDOG: Started (checking every {WATCHDOG_PERIOD_S}s, timeout={CMD_TIMEOUT_S}s)")
-    
-    while True:
-        await asyncio.sleep(WATCHDOG_PERIOD_S)
-        watchdog_iteration += 1
-        
-        # Heartbeat log every 10 seconds to confirm watchdog is alive
-        now = time.monotonic()
-        if now - last_heartbeat_log >= 10.0:
-            log.info(f"WATCHDOG: Heartbeat #{watchdog_iteration} (active clients: {len(command_clients)})")
-            last_heartbeat_log = now
-
-        # Only enforce timeout when at least one client has issued commands.
-        if not command_clients:
-            continue
-
-        age = now - last_command_ts
-        if age > CMD_TIMEOUT_S:
-            success = stop(odrv0, odrv1)
-            if not failsafe_active:
-                log.warning(
-                    f"WATCHDOG TRIGGERED: No command for {age:.3f}s (> {CMD_TIMEOUT_S:.3f}s). "
-                    f"Motors emergency stop {'SUCCEEDED' if success else 'PARTIAL/FAILED'}!"
-                )
-            failsafe_active = True
-
 def make_handler(odrv0, odrv1):
     async def handle_client(websocket):
-        global last_command_ts, failsafe_active
         client_id = f"{websocket.remote_address[0]}:{websocket.remote_address[1]}"
         log.info(f"Client connected: {client_id}")
         last_seq[client_id] = -1
@@ -538,10 +497,6 @@ def make_handler(odrv0, odrv1):
 
                 command_clients.add(client_id)
                 drive(odrv0, odrv1, left_vel, right_vel)
-                last_command_ts = time.monotonic()
-                if failsafe_active:
-                    log.info("Command stream restored. Leaving failsafe state.")
-                    failsafe_active = False
 
                 command_info = {
                     "seq": seq,
@@ -589,16 +544,11 @@ def make_handler(odrv0, odrv1):
 async def main(args):
     log.info("=" * 70)
     log.info("SAFETY CONFIGURATION:")
-    log.info(f"  Watchdog timeout: {CMD_TIMEOUT_S}s (motors stop if no command)")
-    log.info(f"  Watchdog check period: {WATCHDOG_PERIOD_S}s")
+    log.info("  Watchdog: disabled")
     log.info(f"  Max velocity: {args.max_vel} turns/s")
     log.info("=" * 70)
     
     odrv0, odrv1 = connect_odrives()
-    
-    # Start watchdog task
-    watchdog_task = asyncio.create_task(command_watchdog(odrv0, odrv1))
-    log.info("WATCHDOG: Task started")
 
     ros_odom_task = None
     ros_odom_pub = None
@@ -622,11 +572,6 @@ async def main(args):
         finally:
             log.warning("SHUTDOWN: Stopping all motors...")
             stop(odrv0, odrv1)
-            watchdog_task.cancel()
-            try:
-                await watchdog_task
-            except asyncio.CancelledError:
-                pass
 
             if ros_odom_task is not None:
                 ros_odom_task.cancel()

@@ -34,7 +34,7 @@ except Exception:
 
 
 # -- Network -----------------------------------------------------------------
-ROVER_IP = "192.168.10.176"              # CHANGE THIS to your rover's IP address
+ROVER_IP = "192.168.10.177"              # CHANGE THIS to your rover's IP address
 ROVER_PORT = 5760                      # UDP port for arm commands
 
 DRIVE_WS_PORT = 8765                   # ws_to_diffdrive.py WebSocket port
