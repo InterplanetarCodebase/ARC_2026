@@ -8,12 +8,13 @@
 // ================================================================
 
 // ---------- PIN DEFINITIONS ----------
-const int SERVO_PIN = 22;
+const int SERVO_PIN = 33;
 
 // BTS7960 Motor Drivers
 const int RPWM1 = 25, LPWM1 = 26;  // Motor 1 (base rotation or shoulder)
 const int RPWM2 = 12, LPWM2 = 14;  // Motor 2
 const int RPWM3 = 15, LPWM3 = 4;   // Motor 3
+const int RPWM4 = 22;  // Motor 4 (gripper or wrist)
 
 // L298N Motor Driver
 const int IN1 = 19, IN2 = 21;      // Motor 4A
@@ -195,9 +196,12 @@ void setup() {
   pinMode(RPWM1, OUTPUT); pinMode(LPWM1, OUTPUT);
   pinMode(RPWM2, OUTPUT); pinMode(LPWM2, OUTPUT);
   pinMode(RPWM3, OUTPUT); pinMode(LPWM3, OUTPUT);
+  pinMode(RPWM4, OUTPUT); 
   pinMode(IN1, OUTPUT);   pinMode(IN2, OUTPUT);
   pinMode(IN3, OUTPUT);   pinMode(IN4, OUTPUT);
 
+
+  analogWrite(RPWM4, 100);
   myservo.attach(SERVO_PIN);
   myservo.write(90);  // Center on boot
 

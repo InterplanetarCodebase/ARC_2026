@@ -1,0 +1,12 @@
+Night LED on/off -> 15
+
+Indicator LED on/off -> D4
+Indicator LED Signal PWM -> 32
+
+Servo1 -> 33
+Servo2 -> 25
+Servo3 -> 23
+Servo4 -> 5
+
+Laser1 -> 26
+Laser2 -> 13
