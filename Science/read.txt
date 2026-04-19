@@ -1,0 +1,37 @@
+Science board config. Using 30 Pin ESP32 Devkit.
+Currently Using one L298N motor driver and one BTS motor driver, 4 servos and one load cell
+
+L298N:
+
+IN1 - D33
+IN2 - D32
+IN3 - D35
+IN4 - D34
+
+ENA and ENB has jumpers to 5V
+
+
+
+BTS:
+
+LPWM - D12
+RPWM - D13
+VCC, L_EN and R_EN Connected together
+GND connected to ESP GND
+
+
+Servo Signal Pins:
+
+Servo 1 - D14
+Servo 2 - D27
+Servo 3 - D26
+Servo 4 - D25
+
+Load Cell:
+
+
+DT - D23
+SCK - D22
+VCC - 5V
+GND - GND
+
