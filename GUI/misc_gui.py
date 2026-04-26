@@ -387,15 +387,6 @@ def main():
         if connected and (now - last_send) >= SEND_RATE:
             last_send = now
 
-            pressed_edges = []
-            for idx, pressed in enumerate(buttons_state):
-                was_pressed = prev_buttons[idx] if idx < len(prev_buttons) else 0
-                if pressed and not was_pressed:
-                    pressed_edges.append(idx)
-
-            if pressed_edges:
-                print(f"[MISC_GUI] JOY press edges: {pressed_edges}")
-
             # Single-button toggles for outputs to reduce required joystick buttons.
             # B11 -> Night toggle, B12 -> Laser1 toggle, B8 -> Laser2 toggle.
             if len(buttons_state) > 10 and buttons_state[10] and not prev_buttons[10]:
@@ -424,17 +415,9 @@ def main():
             if len(buttons_state) > 13 and buttons_state[13] and not prev_buttons[13]:
                 toggle_led_mode()
 
-            # Fallback for controllers with different button numbering:
-            # any newly pressed button index >= 14 also toggles LED mode.
-            for idx in pressed_edges:
-                if idx >= 14:
-                    toggle_led_mode()
-                    break
-
             # D-pad direct LED mode controls (edge-triggered):
             # Up=RED, Right=GREEN, Left=YELLOW, Down=OFF
             if (hat_x, hat_y) != prev_hat:
-                print(f"[MISC_GUI] JOY hat: ({hat_x:+d}, {hat_y:+d})")
                 if hat_y == 1:
                     set_led_mode(1)
                 elif hat_x == 1:
