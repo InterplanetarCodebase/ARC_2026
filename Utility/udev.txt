@@ -1,0 +1,27 @@
+sudo nano /etc/udev/rules.d/99-esp32-usb.rules
+
+
+# arm_esp — unique serial, any port
+SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d4", ATTRS{serial}=="588F036249", SYMLINK+="arm_esp"
+
+# misc_esp — locked to physical port 1-2.3
+SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", KERNELS=="1-2.3", SYMLINK+="misc_esp"
+
+# science_esp — locked to physical port 1-2.4
+SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", KERNELS=="1-2.4", SYMLINK+="science_esp"
+
+
+
+
+
+sudo udevadm control --reload-rules
+sudo udevadm trigger
+
+
+
+archnoid@archnoid:~$ ls -la /dev/arm_esp /dev/misc_esp /dev/science_esp
+lrwxrwxrwx 1 root root 7 Apr 26 12:47 /dev/arm_esp -> ttyACM0
+lrwxrwxrwx 1 root root 7 Apr 26 12:46 /dev/misc_esp -> ttyUSB1
+lrwxrwxrwx 1 root root 7 Apr 26 12:46 /dev/science_esp -> ttyUSB0
+archnoid@archnoid:~$ 
+

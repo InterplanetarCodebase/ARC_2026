@@ -23,7 +23,7 @@ import pygame
 
 # Network
 # Use rover/Jetson IP when running GUI from a different machine.
-ROVER_IP = "127.0.0.1"
+ROVER_IP = "192.168.10.176"
 MISC_PORT = 5761
 
 # Protocol

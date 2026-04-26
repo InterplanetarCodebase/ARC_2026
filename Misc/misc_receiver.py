@@ -31,7 +31,7 @@ BASE_IP = None
 BASE_PORT = None
 
 # Preferred serial port. Use --serial-port to override at runtime.
-SERIAL_PORT = "/dev/ttyUSB0"
+SERIAL_PORT = "/dev/misc_esp"
 SERIAL_BAUD = 115200
 
 SERIAL_CANDIDATES = [

@@ -35,7 +35,7 @@ UDP_LISTEN_PORT = 5761          # Different port from arm (5760)
 BASE_IP         = None          # Learned from first packet
 BASE_PORT       = None
 
-SERIAL_PORT     = "/dev/ttyUSB0"
+SERIAL_PORT     = "/dev/science_esp"
 SERIAL_BAUD     = 921600
 
 WATCHDOG_TIMEOUT    = 4.0   # seconds — no UDP → ESTOP ESP32
