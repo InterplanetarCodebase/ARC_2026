@@ -25,3 +25,6 @@ lrwxrwxrwx 1 root root 7 Apr 26 12:46 /dev/misc_esp -> ttyUSB1
 lrwxrwxrwx 1 root root 7 Apr 26 12:46 /dev/science_esp -> ttyUSB0
 archnoid@archnoid:~$ 
 
+
+
+sudo systemctl stop misc-receiver science-receiver arm-receiver
