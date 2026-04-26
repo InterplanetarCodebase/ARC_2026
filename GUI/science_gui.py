@@ -26,8 +26,8 @@ os.environ["SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS"] = "1"
 import pygame
 
 # Network
-ROVER_IP = "127.0.0.1"  # Change to rover/science-receiver IP.
-SCI_PORT = 5761
+ROVER_IP = "192.168.10.177"  # Change to rover/science-receiver IP.
+SCI_PORT = 5762
 
 # Packet protocol
 SOF1 = 0xAA

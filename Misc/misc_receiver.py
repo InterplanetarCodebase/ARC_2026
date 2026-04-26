@@ -26,7 +26,7 @@ log = logging.getLogger(__name__)
 
 # --- CONFIG ------------------------------------------------------
 UDP_LISTEN_IP = "0.0.0.0"
-UDP_LISTEN_PORT = 5761
+UDP_LISTEN_PORT = 5763
 BASE_IP = None
 BASE_PORT = None
 

@@ -31,7 +31,7 @@ log = logging.getLogger(__name__)
 
 # ─── CONFIG ───────────────────────────────────────────────────────
 UDP_LISTEN_IP   = "0.0.0.0"
-UDP_LISTEN_PORT = 5761          # Different port from arm (5760)
+UDP_LISTEN_PORT = 5762          # Different port from arm (5760)
 BASE_IP         = None          # Learned from first packet
 BASE_PORT       = None
 
