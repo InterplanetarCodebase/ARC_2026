@@ -1,0 +1,60 @@
+Science board config. Using 30 Pin ESP32 Devkit.
+Currently Using one L298N motor driver and one BTS motor driver, 4 servos and one load cell
+
+L298N:
+
+IN1 - D33
+IN2 - D32
+IN3 - D18  (changed from D35 — D35 is input-only)
+IN4 - D5   (changed from D34 — D34 is input-only)
+
+ENA and ENB has jumpers to 5V
+
+
+
+BTS:
+
+LPWM - D12
+RPWM - D13
+VCC, L_EN and R_EN Connected together
+GND connected to ESP GND
+
+
+Servo Signal Pins:
+
+Servo 1 - D14
+Servo 2 - D27
+Servo 3 - D26
+Servo 4 - D25
+
+Load Cell:
+
+DT - D23
+SCK - D22
+VCC - 5V
+GND - GND
+
+
+Serial Protocol (matches Arm module):
+
+Baud: 921600
+Packet: [0xAA][0xBB][SEQ_H][SEQ_L][CMD][VAL][CRC8]  (7 bytes)
+ACK:    [0xAC][SEQ_H][SEQ_L][STATUS]                 (4 bytes)
+CRC:    CRC8 poly 0x07 (Dallas/Maxim), over first 6 bytes
+
+CMD Table:
+
+  0x11 / 0x12 / 0x13  — L298N Motor A: FWD / REV / STOP
+  0x21 / 0x22 / 0x23  — L298N Motor B: FWD / REV / STOP
+  0x31 / 0x32 / 0x33  — BTS7960: FWD / REV / STOP  (VAL = PWM 0-255)
+  0x41 / 0x42 / 0x43 / 0x44  — Servo 1-4 angle  (VAL = 0-180 degrees)
+  0x45                — All servos center (90 degrees)
+  0x51                — Load cell read  (reply: text line "LOAD raw=<float>")
+  0x52                — Load cell tare
+  0x00                — Heartbeat (resets watchdog)
+  0xFF                — Emergency stop ALL
+
+Watchdog: 3000 ms timeout — ESTOP fires if no packet received
+
+Load cell telemetry comes back as a plain-text line on the same serial stream:
+  LOAD raw=<float>    — parsed by host, not part of binary ACK
