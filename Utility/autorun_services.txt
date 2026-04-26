@@ -1,0 +1,74 @@
+sudo nano /etc/systemd/system/misc-receiver.service
+
+
+[Unit]
+Description=Misc ESP32 Receiver
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/python3 /home/archnoid/Documents/razeen_ARC_2026/ARC_2026/Misc/misc_receiver.py
+WorkingDirectory=/home/archnoid/Documents/razeen_ARC_2026/ARC_2026/Misc
+Restart=always
+RestartSec=3
+User=archnoid
+
+[Install]
+WantedBy=multi-user.target
+
+
+sudo nano /etc/systemd/system/science-receiver.service
+
+
+[Unit]
+Description=Science ESP32 Receiver
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/python3 /home/archnoid/Documents/razeen_ARC_2026/ARC_2026/Science/science_receiver.py
+WorkingDirectory=/home/archnoid/Documents/razeen_ARC_2026/ARC_2026/Science
+Restart=always
+RestartSec=3
+User=archnoid
+
+[Install]
+WantedBy=multi-user.target
+
+
+
+sudo nano /etc/systemd/system/arm-receiver.service
+
+
+[Unit]
+Description=Arm ESP32 Receiver
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/python3 /home/archnoid/Documents/razeen_ARC_2026/ARC_2026/Arm/arm_receiver.py
+WorkingDirectory=/home/archnoid/Documents/razeen_ARC_2026/ARC_2026/Arm
+Restart=always
+RestartSec=3
+User=archnoid
+
+[Install]
+WantedBy=multi-user.target
+
+
+
+sudo systemctl daemon-reload
+
+sudo systemctl enable misc-receiver science-receiver arm-receiver
+sudo systemctl start misc-receiver science-receiver arm-receiver
+
+
+sudo systemctl status misc-receiver
+sudo systemctl status science-receiver
+sudo systemctl status arm-receiver
+
+# View live logs for a service
+journalctl -u arm-receiver -f
+
+# Restart a service manually
+sudo systemctl restart science-receiver
+
+# Stop a service
+sudo systemctl stop misc-receiver

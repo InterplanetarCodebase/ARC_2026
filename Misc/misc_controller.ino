@@ -73,11 +73,8 @@ Adafruit_NeoPixel ledStrip(LED_NUM_PIXELS, LED_MATRIX_PIN, NEO_GRB + NEO_KHZ800)
 // HIGH -> relay OFF
 const uint8_t NIGHT_RELAY_ON_LEVEL = LOW;
 const uint8_t NIGHT_RELAY_OFF_LEVEL = HIGH;
-const uint8_t LED_RELAY_ON_LEVEL = NIGHT_RELAY_ON_LEVEL;
-const uint8_t LED_RELAY_OFF_LEVEL = NIGHT_RELAY_OFF_LEVEL;
 // Ignore very fast ON/OFF transitions that can cause relay chatter.
 const unsigned long NIGHT_LED_MIN_TOGGLE_MS = 150;
-const unsigned long LED_RELAY_SETTLE_MS = 30;
 
 // ---------- WATCHDOG ----------
 #define WATCHDOG_TIMEOUT_MS   1000  // if no packet, ESTOP
@@ -164,23 +161,16 @@ void setNightLed(bool on, bool force = false) {
 }
 
 void setLedRelay(bool on) {
-    safeDigitalWrite(LED_RELAY_PIN, on ? LED_RELAY_ON_LEVEL : LED_RELAY_OFF_LEVEL);
+    safeDigitalWrite(LED_RELAY_PIN, on ? NIGHT_RELAY_ON_LEVEL : NIGHT_RELAY_OFF_LEVEL);
 }
 
 void applyLedMode(LedMode mode, bool force = false) {
-    LedMode previousMode = ledMode;
     if (!force && mode == ledMode) {
         return;
     }
 
     ledMode = mode;
-
-    // When turning power on for the strip, allow relay and supply to settle
-    // before writing pixel data.
-    if (mode != LED_MODE_OFF && previousMode == LED_MODE_OFF) {
-        setLedRelay(true);
-        delay(LED_RELAY_SETTLE_MS);
-    }
+    setLedRelay(mode != LED_MODE_OFF);
 
     uint32_t color = 0;
     if (mode == LED_MODE_RED) {
@@ -197,14 +187,6 @@ void applyLedMode(LedMode mode, bool force = false) {
         }
     }
     ledStrip.show();
-
-    // When turning LEDs off, clear pixels first, then drop relay power.
-    if (mode == LED_MODE_OFF) {
-        delay(LED_RELAY_SETTLE_MS);
-        setLedRelay(false);
-    } else {
-        setLedRelay(true);
-    }
 }
 
 LedMode nextLedMode(LedMode current) {
@@ -242,11 +224,9 @@ LedMode ledModeFromValue(uint8_t val) {
 // ================================================================
 // Emergency Stop - all outputs off
 // ================================================================
-void emergencyStop(bool includeLed = true) {
+void emergencyStop() {
     setNightLed(false);
-    if (includeLed) {
-        applyLedMode(LED_MODE_OFF, true);
-    }
+    applyLedMode(LED_MODE_OFF, true);
     safeDigitalWrite(LASER1_PIN, LOW);
     safeDigitalWrite(LASER2_PIN, LOW);
 
@@ -317,7 +297,7 @@ uint8_t executeCommand(uint8_t cmd, uint8_t val) {
             break;
 
         case CMD_ESTOP:
-            emergencyStop(true);
+            emergencyStop();
             return STATUS_ESTOP;
 
         default:
@@ -385,8 +365,7 @@ void setup() {
 // ================================================================
 void loop() {
     if (!watchdogTripped && (millis() - lastPacketTime > WATCHDOG_TIMEOUT_MS)) {
-        // Keep current LED mode latched on link timeout; still force motion/safety outputs off.
-        emergencyStop(false);
+        emergencyStop();
     }
 
     while (Serial.available()) {
